@@ -159,6 +159,13 @@ BookSimConfig::BookSimConfig( )
 
   _int_map["class_priority"] = 0;
   AddStrField("class_priority", ""); // workaraound to allow for vector specification
+  _int_map["class_slo"] = -1;
+  AddStrField("class_slo", ""); // per-class latency target (cycles) for policies
+  _float_map["class_priority_boost"] = 1.0;
+  AddStrField("class_priority_boost", ""); // optional boost when over SLO
+  AddStrField("class_assigner", "static");
+  AddStrField("priority_policy", "static_class");
+  AddStrField("dvfs_policy", "uniform");
 
   _int_map["perm_seed"] = 0; // seed value for random permuation trafficpattern generator
   AddStrField("perm_seed", ""); // workaround to allow special "time" value
@@ -183,6 +190,9 @@ BookSimConfig::BookSimConfig( )
   _float_map["burst_r1"] = -1.0; // burst rate
 
   AddStrField( "priority", "none" );  // message priorities
+  _int_map["dvfs_epoch"] = 0; // number of cycles between DVFS updates; 0 disables
+  _float_map["power_cap"] = 0.0; // optional power cap for DVFS policies
+  AddStrField("router_domains", ""); // optional router->domain mapping
 
   _int_map["batch_size"] = 1000;
   _int_map["batch_count"] = 1;

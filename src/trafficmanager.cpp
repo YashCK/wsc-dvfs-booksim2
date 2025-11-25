@@ -39,6 +39,7 @@
 #include "random_utils.hpp" 
 #include "vc.hpp"
 #include "packet_reply_info.hpp"
+#include "policy/policy_factory.hpp"
 
 TrafficManager * TrafficManager::New(Configuration const & config,
                                      vector<Network *> const & net)
@@ -221,6 +222,15 @@ TrafficManager::TrafficManager( const Configuration &config, const vector<Networ
         _class_priority.push_back(config.GetInt("class_priority"));
     }
     _class_priority.resize(_classes, _class_priority.back());
+    _class_cfg = ParseClassConfig(config, _classes);
+    _policy_telemetry.class_latency_p99.assign(_classes, 0.0);
+
+    _class_assigner = MakeClassAssigner(config, _classes);
+    _priority_policy = MakePriorityPolicy(config);
+    _dvfs_policy = MakeDVFSPolicy(config);
+    _dvfs_epoch = config.GetInt("dvfs_epoch");
+    _last_dvfs_epoch = 0;
+    _power_telemetry.router_power.assign(_routers, 0.0);
 
     vector<string> injection_process = config.GetStrArray("injection_process");
     injection_process.resize(_classes, injection_process.back());
@@ -296,6 +306,16 @@ TrafficManager::TrafficManager( const Configuration &config, const vector<Networ
     _router.resize(_subnets);
     for (int i=0; i < _subnets; ++i) {
         _router[i] = _net[i]->GetRouters();
+    }
+    _router_domains = config.GetIntArray("router_domains");
+    if(_router_domains.empty()) {
+        _router_domains.assign(_routers, 0);
+    }
+    _router_domains.resize(_routers, _router_domains.back());
+    for(int subnet = 0; subnet < _subnets; ++subnet) {
+        for(int r = 0; r < _routers; ++r) {
+            _router[subnet][r]->SetFrequencyDomain(_router_domains[r]);
+        }
     }
 
     //seed the network
@@ -455,16 +475,19 @@ TrafficManager::TrafficManager( const Configuration &config, const vector<Networ
     _overall_min_plat.resize(_classes, 0.0);
     _overall_avg_plat.resize(_classes, 0.0);
     _overall_max_plat.resize(_classes, 0.0);
+    _plat_pcnt_stats.resize(_classes, static_cast<PercentileStats *>(NULL));
 
     _nlat_stats.resize(_classes);
     _overall_min_nlat.resize(_classes, 0.0);
     _overall_avg_nlat.resize(_classes, 0.0);
     _overall_max_nlat.resize(_classes, 0.0);
+    _nlat_pcnt_stats.resize(_classes, static_cast<PercentileStats *>(NULL));
 
     _flat_stats.resize(_classes);
     _overall_min_flat.resize(_classes, 0.0);
     _overall_avg_flat.resize(_classes, 0.0);
     _overall_max_flat.resize(_classes, 0.0);
+    _flat_pcnt_stats.resize(_classes, static_cast<PercentileStats *>(NULL));
 
     _frag_stats.resize(_classes);
     _overall_min_frag.resize(_classes, 0.0);
@@ -517,16 +540,19 @@ TrafficManager::TrafficManager( const Configuration &config, const vector<Networ
         tmp_name << "plat_stat_" << c;
         _plat_stats[c] = new Stats( this, tmp_name.str( ), 1.0, 1000 );
         _stats[tmp_name.str()] = _plat_stats[c];
+        _plat_pcnt_stats[c] = new PercentileStats();
         tmp_name.str("");
-
+  
         tmp_name << "nlat_stat_" << c;
         _nlat_stats[c] = new Stats( this, tmp_name.str( ), 1.0, 1000 );
         _stats[tmp_name.str()] = _nlat_stats[c];
+        _nlat_pcnt_stats[c] = new PercentileStats();
         tmp_name.str("");
-
+  
         tmp_name << "flat_stat_" << c;
         _flat_stats[c] = new Stats( this, tmp_name.str( ), 1.0, 1000 );
         _stats[tmp_name.str()] = _flat_stats[c];
+        _flat_pcnt_stats[c] = new PercentileStats();
         tmp_name.str("");
 
         tmp_name << "frag_stat_" << c;
@@ -600,6 +626,9 @@ TrafficManager::~TrafficManager( )
         delete _nlat_stats[c];
         delete _flat_stats[c];
         delete _frag_stats[c];
+        delete _plat_pcnt_stats[c];
+        delete _nlat_pcnt_stats[c];
+        delete _flat_pcnt_stats[c];
         delete _hop_stats[c];
 
         delete _traffic_pattern[c];
@@ -674,6 +703,7 @@ void TrafficManager::_RetireFlit( Flit *f, int dest )
        (_flat_stats[f->cl]->Max() < (f->atime - f->itime)))
         _slowest_flit[f->cl] = f->id;
     _flat_stats[f->cl]->AddSample( f->atime - f->itime);
+    _flat_pcnt_stats[f->cl]->AddSample( f->atime - f->itime);
     if(_pair_stats){
         _pair_flat[f->cl][f->src*_nodes+dest]->AddSample( f->atime - f->itime );
     }
@@ -730,6 +760,8 @@ void TrafficManager::_RetireFlit( Flit *f, int dest )
                 _slowest_packet[f->cl] = f->pid;
             _plat_stats[f->cl]->AddSample( f->atime - head->ctime);
             _nlat_stats[f->cl]->AddSample( f->atime - head->itime);
+            _plat_pcnt_stats[f->cl]->AddSample( f->atime - head->ctime);
+            _nlat_pcnt_stats[f->cl]->AddSample( f->atime - head->itime);
             _frag_stats[f->cl]->AddSample( (f->atime - head->atime) - (f->id - head->id) );
    
             if(_pair_stats){
@@ -788,6 +820,14 @@ void TrafficManager::_GeneratePacket( int source, int stype,
     assert(stype!=0);
 
     Flit::FlitType packet_type = Flit::ANY_TYPE;
+    int assigned_cl = cl;
+    if(_class_assigner) {
+        assigned_cl = _class_assigner->Assign(source, -1, cl, _policy_telemetry);
+        if((assigned_cl < 0) || (assigned_cl >= _classes)) {
+            assigned_cl = cl;
+        }
+    }
+    cl = assigned_cl;
     int size = _GetNextPacketSize(cl); //input size 
     int pid = _cur_pid++;
     assert(_cur_pid);
@@ -898,6 +938,9 @@ void TrafficManager::_GeneratePacket( int source, int stype,
         default:
             f->pri = 0;
         }
+        if(_priority_policy) {
+            _priority_policy->OnEnqueue(*f, _class_cfg[f->cl], _policy_telemetry);
+        }
         if ( i == ( size - 1 ) ) { // Tail flit
             f->tail = true;
         } else {
@@ -953,6 +996,7 @@ void TrafficManager::_Inject(){
 
 void TrafficManager::_Step( )
 {
+    _policy_telemetry.time = _time;
     bool flits_in_flight = false;
     for(int c = 0; c < _classes; ++c) {
         flits_in_flight |= !_total_in_flight_flits[c].empty();
@@ -1266,12 +1310,44 @@ void TrafficManager::_Step( )
         _net[subnet]->WriteOutputs( );
     }
 
+    _MaybeRunDVFS();
+
     ++_time;
     assert(_time);
     if(gTrace){
         cout<<"TIME "<<_time<<endl;
     }
 
+}
+
+void TrafficManager::_MaybeRunDVFS() {
+    if(!_dvfs_policy || (_dvfs_epoch <= 0)) {
+        return;
+    }
+    if((_time - _last_dvfs_epoch) < _dvfs_epoch) {
+        return;
+    }
+    _last_dvfs_epoch = _time;
+
+    struct TMControl : public NetworkControl {
+        explicit TMControl(TrafficManager* tm_in) : tm(tm_in) {}
+        TrafficManager* tm;
+        void SetRouterSpeed(int router_id, double freq_scale) override {
+            if((router_id < 0) || (router_id >= tm->_routers)) return;
+            for(int subnet = 0; subnet < tm->_subnets; ++subnet) {
+                tm->_router[subnet][router_id]->SetFrequencyScale(freq_scale);
+            }
+        }
+        void SetDomainSpeed(int domain_id, double freq_scale) override {
+            for(size_t r = 0; r < tm->_router_domains.size(); ++r) {
+                if(tm->_router_domains[r] == domain_id) {
+                    SetRouterSpeed(static_cast<int>(r), freq_scale);
+                }
+            }
+        }
+    } ctrl(this);
+
+    _dvfs_policy->Update(_power_telemetry, ctrl, (_dvfs_epoch ? (_time / _dvfs_epoch) : 0));
 }
   
 bool TrafficManager::_PacketsOutstanding( ) const
@@ -1304,6 +1380,7 @@ void TrafficManager::_ClearStats( )
 {
     _slowest_flit.assign(_classes, -1);
     _slowest_packet.assign(_classes, -1);
+    _policy_telemetry.class_latency_p99.assign(_classes, 0.0);
 
     for ( int c = 0; c < _classes; ++c ) {
 
@@ -1312,6 +1389,10 @@ void TrafficManager::_ClearStats( )
         _flat_stats[c]->Clear( );
 
         _frag_stats[c]->Clear( );
+
+        _plat_pcnt_stats[c]->Clear();
+        _nlat_pcnt_stats[c]->Clear();
+        _flat_pcnt_stats[c]->Clear();
 
         _sent_packets[c].assign(_nodes, 0);
         _accepted_packets[c].assign(_nodes, 0);
@@ -1894,6 +1975,13 @@ void TrafficManager::WriteStats(ostream & os) const {
 }
 
 void TrafficManager::UpdateStats() {
+    _policy_telemetry.time = _time;
+    _policy_telemetry.class_latency_p99.resize(_classes, 0.0);
+    for(int c = 0; c < _classes; ++c) {
+        if(_measure_stats[c]) {
+            _policy_telemetry.class_latency_p99[c] = _nlat_pcnt_stats[c]->Percentile(0.99);
+        }
+    }
 #if defined(TRACK_FLOWS) || defined(TRACK_STALLS)
     for(int c = 0; c < _classes; ++c) {
 #ifdef TRACK_FLOWS

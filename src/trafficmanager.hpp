@@ -32,6 +32,7 @@
 #include <map>
 #include <set>
 #include <cassert>
+#include <memory>
 
 #include "module.hpp"
 #include "config_utils.hpp"
@@ -43,6 +44,12 @@
 #include "routefunc.hpp"
 #include "outputset.hpp"
 #include "injection.hpp"
+#include "class_config.hpp"
+#include "percentile_stats.hpp"
+#include "policy/class_assigner.hpp"
+#include "policy/priority_policy.hpp"
+#include "policy/dvfs_policy.hpp"
+#include "policy/telemetry.hpp"
 
 //register the requests to a node
 class PacketReplyInfo;
@@ -62,6 +69,7 @@ protected:
 
   vector<Network *> _net;
   vector<vector<Router *> > _router;
+  vector<int> _router_domains;
 
   // ============ Traffic ============ 
 
@@ -80,6 +88,12 @@ protected:
   vector<string> _traffic;
 
   vector<int> _class_priority;
+  vector<ClassConfig> _class_cfg;
+
+  PolicyTelemetry _policy_telemetry;
+  std::unique_ptr<ClassAssigner> _class_assigner;
+  std::unique_ptr<PriorityPolicy> _priority_policy;
+  std::unique_ptr<DVFSPolicy> _dvfs_policy;
 
   vector<vector<int> > _last_class;
 
@@ -119,6 +133,9 @@ protected:
   bool _empty_network;
 
   bool _hold_switch_for_packet;
+  int _dvfs_epoch;
+  long long _last_dvfs_epoch;
+  PowerTelemetry _power_telemetry;
 
   // ============ physical sub-networks ==========
 
@@ -143,16 +160,19 @@ protected:
   vector<double> _overall_min_plat;  
   vector<double> _overall_avg_plat;  
   vector<double> _overall_max_plat;  
+  vector<PercentileStats *> _plat_pcnt_stats;
 
   vector<Stats *> _nlat_stats;     
   vector<double> _overall_min_nlat;  
   vector<double> _overall_avg_nlat;  
   vector<double> _overall_max_nlat;  
+  vector<PercentileStats *> _nlat_pcnt_stats;
 
   vector<Stats *> _flat_stats;     
   vector<double> _overall_min_flat;  
   vector<double> _overall_avg_flat;  
   vector<double> _overall_max_flat;  
+  vector<PercentileStats *> _flat_pcnt_stats;
 
   vector<Stats *> _frag_stats;
   vector<double> _overall_min_frag;
@@ -266,6 +286,7 @@ protected:
 
   void _Inject();
   void _Step( );
+  void _MaybeRunDVFS();
 
   bool _PacketsOutstanding( ) const;
   

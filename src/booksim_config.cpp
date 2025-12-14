@@ -163,6 +163,13 @@ BookSimConfig::BookSimConfig( )
   AddStrField("class_slo", ""); // per-class latency target (cycles) for policies
   _float_map["class_priority_boost"] = 1.0;
   AddStrField("class_priority_boost", ""); // optional boost when over SLO
+  _int_map["limit"] = 0; // optional node limit (0 = no limit)
+  _int_map["use_netrace"] = 0;
+  AddStrField("netrace_file", "");
+  _int_map["netrace_region"] = 0;
+  _int_map["netrace_ignore_deps"] = 0;
+  _int_map["netrace_scale"] = 1; // divide trace cycles by this factor
+  _int_map["netrace_class"] = 0;
   AddStrField("class_assigner", "static");
   AddStrField("priority_policy", "static_class");
   AddStrField("dvfs_policy", "uniform");
@@ -193,6 +200,10 @@ BookSimConfig::BookSimConfig( )
   _int_map["dvfs_epoch"] = 0; // number of cycles between DVFS updates; 0 disables
   _float_map["power_cap"] = 0.0; // optional power cap for DVFS policies
   AddStrField("router_domains", ""); // optional router->domain mapping
+  AddStrField("dvfs_freqs", ""); // e.g., "1.0,0.75,0.5"
+  AddStrField("dvfs_voltages", ""); // e.g., "1.0,0.9,0.8"
+  _float_map["power_dyn_base"] = 1.0; // arbitrary base dynamic power per router
+  _float_map["power_leak_base"] = 0.1; // arbitrary base leakage per router
 
   _int_map["batch_size"] = 1000;
   _int_map["batch_count"] = 1;

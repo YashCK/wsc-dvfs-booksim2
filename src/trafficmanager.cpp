@@ -40,6 +40,7 @@
 #include "vc.hpp"
 #include "packet_reply_info.hpp"
 #include "policy/policy_factory.hpp"
+#include <cmath>
 
 TrafficManager * TrafficManager::New(Configuration const & config,
                                      vector<Network *> const & net)
@@ -228,9 +229,37 @@ TrafficManager::TrafficManager( const Configuration &config, const vector<Networ
     _class_assigner = MakeClassAssigner(config, _classes);
     _priority_policy = MakePriorityPolicy(config);
     _dvfs_policy = MakeDVFSPolicy(config);
+    _channel_width = config.GetInt("channel_width");
+    _use_netrace = (config.GetInt("use_netrace") > 0);
+    _netrace_class = config.GetInt("netrace_class");
+    if(_netrace_class < 0) _netrace_class = 0;
+    if(_netrace_class >= _classes) _netrace_class = _classes - 1;
+    if(_use_netrace) {
+        string netrace_file = config.GetStr("netrace_file");
+        if(netrace_file.empty()) {
+            Error("use_netrace set but netrace_file not provided.");
+        }
+        int netrace_region = config.GetInt("netrace_region");
+        bool netrace_ignore_deps = (config.GetInt("netrace_ignore_deps") > 0);
+        int netrace_scale = config.GetInt("netrace_scale");
+        _netrace_adapter.reset(
+            new NetraceAdapter(netrace_file, _nodes, netrace_ignore_deps,
+                               netrace_region, netrace_scale));
+    }
     _dvfs_epoch = config.GetInt("dvfs_epoch");
     _last_dvfs_epoch = 0;
     _power_telemetry.router_power.assign(_routers, 0.0);
+    _dvfs_freqs = config.GetFloatArray("dvfs_freqs");
+    _dvfs_voltages = config.GetFloatArray("dvfs_voltages");
+    if(_dvfs_freqs.empty()) {
+        _dvfs_freqs.push_back(1.0);
+    }
+    if(_dvfs_voltages.empty()) {
+        _dvfs_voltages.push_back(1.0);
+    }
+    _dvfs_voltages.resize(_dvfs_freqs.size(), _dvfs_voltages.back());
+    _power_dyn_base = config.GetFloat("power_dyn_base");
+    _power_leak_base = config.GetFloat("power_leak_base");
 
     vector<string> injection_process = config.GetStrArray("injection_process");
     injection_process.resize(_classes, injection_process.back());
@@ -317,6 +346,7 @@ TrafficManager::TrafficManager( const Configuration &config, const vector<Networ
             _router[subnet][r]->SetFrequencyDomain(_router_domains[r]);
         }
     }
+    _router_freq_scale.assign(_routers, 1.0);
 
     //seed the network
     int seed;
@@ -615,6 +645,13 @@ TrafficManager::TrafficManager( const Configuration &config, const vector<Networ
 TrafficManager::~TrafficManager( )
 {
 
+    if(_netrace_adapter) {
+        for(auto &entry : _netrace_inflight) {
+            _netrace_adapter->OnEject(entry.second);
+        }
+        _netrace_inflight.clear();
+    }
+
     for ( int source = 0; source < _nodes; ++source ) {
         for ( int subnet = 0; subnet < _subnets; ++subnet ) {
             delete _buf_states[source][subnet];
@@ -708,11 +745,11 @@ void TrafficManager::_RetireFlit( Flit *f, int dest )
         _pair_flat[f->cl][f->src*_nodes+dest]->AddSample( f->atime - f->itime );
     }
       
-    if ( f->tail ) {
-        Flit * head;
-        if(f->head) {
-            head = f;
-        } else {
+        if ( f->tail ) {
+            Flit * head;
+            if(f->head) {
+                head = f;
+            } else {
             map<int, Flit *>::iterator iter = _retired_packets[f->cl].find(f->pid);
             assert(iter != _retired_packets[f->cl].end());
             head = iter->second;
@@ -773,6 +810,14 @@ void TrafficManager::_RetireFlit( Flit *f, int dest )
         if(f != head) {
             head->Free();
         }
+
+        if(_use_netrace && _netrace_adapter) {
+            auto it = _netrace_inflight.find(f->pid);
+            if(it != _netrace_inflight.end()) {
+                _netrace_adapter->OnEject(it->second);
+                _netrace_inflight.erase(it);
+            }
+        }
     
     }
   
@@ -815,7 +860,10 @@ int TrafficManager::_IssuePacket( int source, int cl )
 }
 
 void TrafficManager::_GeneratePacket( int source, int stype, 
-                                      int cl, int time )
+                                      int cl, int time,
+                                      int destination_override,
+                                      int size_override,
+                                      Flit::FlitType packet_type_override )
 {
     assert(stype!=0);
 
@@ -866,6 +914,16 @@ void TrafficManager::_GeneratePacket( int source, int stype,
             _repliesPending[source].pop_front();
             rinfo->Free();
         }
+    }
+
+    if(destination_override >= 0) {
+        packet_destination = destination_override;
+    }
+    if(size_override > 0) {
+        size = size_override;
+    }
+    if(packet_type_override != Flit::ANY_TYPE) {
+        packet_type = packet_type_override;
     }
 
     if ((packet_destination <0) || (packet_destination >= _nodes)) {
@@ -963,6 +1021,54 @@ void TrafficManager::_GeneratePacket( int source, int stype,
 }
 
 void TrafficManager::_Inject(){
+
+    if(_use_netrace && _netrace_adapter) {
+        _netrace_adapter->AdvanceTo(_time);
+        int cl = _netrace_class;
+        for (int input = 0; input < _nodes; ++input) {
+            if (_partial_packets[input][cl].empty() &&
+                _netrace_adapter->Ready(input, _time)) {
+                NetracePacket pkt = _netrace_adapter->PopReady(input, _time);
+                if (pkt.packet) {
+                    int bytes = nt_get_packet_size(pkt.packet);
+                    int size_flits = 1;
+                    if (bytes > 0) {
+                        size_flits =
+                            (bytes * 8 + _channel_width - 1) / _channel_width;
+                        if (size_flits < 1) size_flits = 1;
+                    }
+                    Flit::FlitType packet_type = Flit::ANY_TYPE;
+                    switch(pkt.packet->type) {
+                    case 1: packet_type = Flit::READ_REQUEST; break;
+                    case 2: // ReadResp
+                    case 3: // ReadRespWithInvalidate
+                        packet_type = Flit::READ_REPLY; break;
+                    case 4: packet_type = Flit::WRITE_REQUEST; break;
+                    case 5: packet_type = Flit::WRITE_REPLY; break;
+                    default: packet_type = Flit::ANY_TYPE; break;
+                    }
+                    _packet_seq_no[input]++;
+                    _requestsOutstanding[input]++;
+                    int assigned_pid = _cur_pid;
+                    long long inject_cycle = pkt.cycle;
+                    if (inject_cycle < _time) inject_cycle = _time;
+                    if (inject_cycle > std::numeric_limits<int>::max()) {
+                        inject_cycle = std::numeric_limits<int>::max();
+                    }
+                    _GeneratePacket(input, 1, cl,
+                                    static_cast<int>(inject_cycle),
+                                    static_cast<int>(pkt.packet->dst),
+                                    size_flits, packet_type);
+                    _netrace_inflight[assigned_pid] = pkt.packet;
+                }
+            }
+            if ((_sim_state == draining) && _netrace_adapter->Done() &&
+                _partial_packets[input][cl].empty()) {
+                _qdrained[input][cl] = true;
+            }
+        }
+        return;
+    }
 
     for ( int input = 0; input < _nodes; ++input ) {
         for ( int c = 0; c < _classes; ++c ) {
@@ -1329,11 +1435,39 @@ void TrafficManager::_MaybeRunDVFS() {
     }
     _last_dvfs_epoch = _time;
 
+    double base_freq = _dvfs_freqs.empty() ? 1.0 : _dvfs_freqs[0];
+    _power_telemetry.total_power = 0.0;
+    _power_telemetry.router_power.assign(_routers, 0.0);
+    auto nearest_voltage = [&](double freq)->double {
+        double best_v = _dvfs_voltages.empty() ? 1.0 : _dvfs_voltages.back();
+        if(_dvfs_freqs.empty() || _dvfs_voltages.empty()) return best_v;
+        double best_err = fabs(freq - _dvfs_freqs[0]);
+        best_v = _dvfs_voltages[0];
+        for(size_t i = 0; i < _dvfs_freqs.size(); ++i) {
+            double err = fabs(freq - _dvfs_freqs[i]);
+            if(err < best_err) {
+                best_err = err;
+                best_v = _dvfs_voltages[i];
+            }
+        }
+        return best_v;
+    };
+    for(int r = 0; r < _routers; ++r) {
+        double freq = base_freq * _router_freq_scale[r];
+        double v = nearest_voltage(freq);
+        double dyn = _power_dyn_base * v * v * freq;
+        double leak = _power_leak_base * v;
+        double p = dyn + leak;
+        _power_telemetry.router_power[r] = p;
+        _power_telemetry.total_power += p;
+    }
+
     struct TMControl : public NetworkControl {
         explicit TMControl(TrafficManager* tm_in) : tm(tm_in) {}
         TrafficManager* tm;
         void SetRouterSpeed(int router_id, double freq_scale) override {
             if((router_id < 0) || (router_id >= tm->_routers)) return;
+            tm->_router_freq_scale[router_id] = freq_scale;
             for(int subnet = 0; subnet < tm->_subnets; ++subnet) {
                 tm->_router[subnet][router_id]->SetFrequencyScale(freq_scale);
             }
@@ -1341,6 +1475,7 @@ void TrafficManager::_MaybeRunDVFS() {
         void SetDomainSpeed(int domain_id, double freq_scale) override {
             for(size_t r = 0; r < tm->_router_domains.size(); ++r) {
                 if(tm->_router_domains[r] == domain_id) {
+                    tm->_router_freq_scale[r] = freq_scale;
                     SetRouterSpeed(static_cast<int>(r), freq_scale);
                 }
             }

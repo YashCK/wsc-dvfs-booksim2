@@ -33,6 +33,7 @@
 #include <set>
 #include <cassert>
 #include <memory>
+#include <unordered_map>
 
 #include "module.hpp"
 #include "config_utils.hpp"
@@ -50,6 +51,7 @@
 #include "policy/priority_policy.hpp"
 #include "policy/dvfs_policy.hpp"
 #include "policy/telemetry.hpp"
+#include "netrace_adapter.hpp"
 
 //register the requests to a node
 class PacketReplyInfo;
@@ -70,6 +72,11 @@ protected:
   vector<Network *> _net;
   vector<vector<Router *> > _router;
   vector<int> _router_domains;
+  vector<double> _router_freq_scale;
+  vector<double> _dvfs_freqs;
+  vector<double> _dvfs_voltages;
+  double _power_dyn_base;
+  double _power_leak_base;
 
   // ============ Traffic ============ 
 
@@ -94,6 +101,11 @@ protected:
   std::unique_ptr<ClassAssigner> _class_assigner;
   std::unique_ptr<PriorityPolicy> _priority_policy;
   std::unique_ptr<DVFSPolicy> _dvfs_policy;
+  bool _use_netrace;
+  int _netrace_class;
+  int _channel_width;
+  std::unique_ptr<NetraceAdapter> _netrace_adapter;
+  std::unordered_map<int, nt_packet_t *> _netrace_inflight;
 
   vector<vector<int> > _last_class;
 
@@ -291,7 +303,10 @@ protected:
   bool _PacketsOutstanding( ) const;
   
   virtual int  _IssuePacket( int source, int cl );
-  void _GeneratePacket( int source, int size, int cl, int time );
+  void _GeneratePacket( int source, int size, int cl, int time,
+                        int destination_override = -1,
+                        int size_override = -1,
+                        Flit::FlitType packet_type_override = Flit::ANY_TYPE );
 
   virtual void _ClearStats( );
 

@@ -39,6 +39,7 @@
 
 #include <queue>
 #include <cassert>
+#include <cmath>
 
 #include "globals.hpp"
 #include "module.hpp"
@@ -54,6 +55,7 @@ public:
 
   // Physical Parameters
   void SetLatency(int cycles);
+  void ScaleLatency(double factor);
   int GetLatency() const { return _delay ; }
   
   // Send data 
@@ -68,6 +70,7 @@ public:
 
 protected:
   int _delay;
+  int _base_delay;
   T * _input;
   T * _output;
   queue<pair<int, T *> > _wait_queue;
@@ -76,7 +79,7 @@ protected:
 
 template<typename T>
 Channel<T>::Channel(Module * parent, string const & name)
-  : TimedModule(parent, name), _delay(1), _input(0), _output(0) {
+  : TimedModule(parent, name), _delay(1), _base_delay(1), _input(0), _output(0) {
 }
 
 template<typename T>
@@ -85,6 +88,17 @@ void Channel<T>::SetLatency(int cycles) {
     Error("Channel must have positive delay.");
   }
   _delay = cycles ;
+  _base_delay = cycles;
+}
+
+template<typename T>
+void Channel<T>::ScaleLatency(double factor) {
+  if(factor <= 0.0) {
+    Error("Channel latency scale must be positive.");
+  }
+  int scaled = static_cast<int>(ceil(static_cast<double>(_base_delay) * factor));
+  if(scaled <= 0) scaled = 1;
+  _delay = scaled;
 }
 
 template<typename T>

@@ -27,7 +27,7 @@
 LEX = flex
 YACC   = bison -y
 DEFINE = 
-INCPATH = -I. -Iarbiters -Iallocators -Irouters -Inetworks -Ipower
+INCPATH = -I. -Iarbiters -Iallocators -Irouters -Inetworks -Ipower -I../../netrace
 CPPFLAGS += -Wall $(INCPATH) $(DEFINE)
 CPPFLAGS += -O3
 CPPFLAGS += -g
@@ -41,6 +41,9 @@ CPP_HDRS = $(wildcard *.hpp) $(wildcard */*.hpp)
 CPP_DEPS = $(CPP_SRCS:.cpp=.d)
 CPP_OBJS = $(CPP_SRCS:.cpp=.o)
 
+NETRACE_SRCS = ../../netrace/netrace.c
+NETRACE_OBJS = $(NETRACE_SRCS:.c=.o)
+
 LEX_SRCS = lex.yy.c
 LEX_OBJS = lex.yy.o
 
@@ -48,7 +51,7 @@ YACC_SRCS = y.tab.c
 YACC_HDRS = y.tab.h
 YACC_OBJS = y.tab.o
 
-OBJS :=  $(CPP_OBJS) $(LEX_OBJS) $(YACC_OBJS)
+OBJS :=  $(CPP_OBJS) $(LEX_OBJS) $(YACC_OBJS) $(NETRACE_OBJS)
 
 .PHONY: clean
 
@@ -71,6 +74,9 @@ $(YACC_OBJS): $(YACC_SRCS)
 
 %.o: %.cpp
 	$(CXX) $(CPPFLAGS) -MMD -c $< -o $@
+
+%.o: %.c
+	$(CC) $(CPPFLAGS) -c $< -o $@
 
 clean:
 	rm -f $(YACC_SRCS) $(YACC_HDRS)

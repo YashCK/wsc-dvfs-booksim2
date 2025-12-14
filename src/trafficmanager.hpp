@@ -82,6 +82,8 @@ protected:
   bool _use_orion;
   std::ostream * _dvfs_log_out;
   std::string _dvfs_log_name;
+  std::string _output_dir;
+  std::string _run_name;
 
   // ============ Traffic ============ 
 

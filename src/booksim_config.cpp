@@ -212,6 +212,10 @@ BookSimConfig::BookSimConfig( )
   _float_map["power_leak_base"] = 0.1; // arbitrary base leakage per router
   AddStrField("dvfs_log", ""); // optional DVFS/power log file
 
+  // Output directories/names
+  AddStrField("output_dir", "sims");
+  AddStrField("run_name", "run");
+
   // Orion power modeling (defaults chosen to allow build/run without user config)
   _int_map["use_orion"] = 0;
   _float_map["Vdd"] = 1.0;

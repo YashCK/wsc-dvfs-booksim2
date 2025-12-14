@@ -42,9 +42,11 @@
 #include "policy/policy_factory.hpp"
 #include <cmath>
 #include "routers/iq_router.hpp"
+#include <sys/stat.h>
+#include <sys/types.h>
 
 TrafficManager * TrafficManager::New(Configuration const & config,
-                                     vector<Network *> const & net)
+				     vector<Network *> const & net)
 {
     TrafficManager * result = NULL;
     string sim_type = config.GetStr("sim_type");
@@ -265,19 +267,47 @@ TrafficManager::TrafficManager( const Configuration &config, const vector<Networ
     _power_dyn_base = config.GetFloat("power_dyn_base");
     _power_leak_base = config.GetFloat("power_leak_base");
     _use_orion = config.GetInt("use_orion") > 0;
+    _output_dir = config.GetStr("output_dir");
+    _run_name = config.GetStr("run_name");
     _dvfs_log_out = NULL;
     _dvfs_log_name = config.GetStr("dvfs_log");
+    auto ensure_dir = [](const string &path) {
+        if(path.empty()) return;
+        size_t pos = 0;
+        while(true) {
+            pos = path.find('/', pos + 1);
+            string sub = path.substr(0, pos);
+            if(sub.empty()) continue;
+            mkdir(sub.c_str(), 0755);
+            if(pos == string::npos) break;
+        }
+    };
+    string base_dir = _output_dir.empty() ? "sims" : _output_dir;
+    if(!_run_name.empty()) {
+        base_dir += "/" + _run_name;
+    }
+    ensure_dir(base_dir);
+    string dvfs_path;
     if(!_dvfs_log_name.empty()) {
         if(_dvfs_log_name == "-") {
-            _dvfs_log_out = &cout;
+            dvfs_path = "-";
+        } else if(!_dvfs_log_name.empty() && _dvfs_log_name[0] == '/') {
+            dvfs_path = _dvfs_log_name;
         } else {
-            std::ofstream *out = new ofstream(_dvfs_log_name.c_str());
-            if(out->good()) {
-                _dvfs_log_out = out;
-            } else {
-                delete out;
-                _dvfs_log_out = NULL;
-            }
+            dvfs_path = base_dir + "/" + _dvfs_log_name;
+        }
+    } else {
+        dvfs_path = base_dir + "/power_log";
+    }
+    if(dvfs_path == "-") {
+        _dvfs_log_out = &cout;
+    } else {
+        std::ofstream *out = new ofstream(dvfs_path.c_str());
+        if(out->good()) {
+            _dvfs_log_out = out;
+        } else {
+            delete out;
+            _dvfs_log_out = NULL;
         }
     }
 

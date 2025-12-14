@@ -82,6 +82,15 @@ void NetraceAdapter::AdvanceTo(long long time) {
     long long inject_cycle =
         static_cast<long long>(_next_packet->cycle / _scale);
     _next_packet = nt_read_packet(_ctx);
+    if ((pkt->src >= static_cast<unsigned>(_nodes)) ||
+        (pkt->dst >= static_cast<unsigned>(_nodes))) {
+      std::cerr << "warning: skipping netrace packet with src/dst out of range: "
+                << static_cast<int>(pkt->src) << "->"
+                << static_cast<int>(pkt->dst) << " (nodes=" << _nodes << ")"
+                << std::endl;
+      nt_clear_dependencies_free_packet(_ctx, pkt);
+      continue;
+    }
     NetracePacket wrapped{pkt, inject_cycle};
     if (_ignore_deps || nt_dependencies_cleared(_ctx, pkt)) {
       _ready[pkt->src].push_back(wrapped);

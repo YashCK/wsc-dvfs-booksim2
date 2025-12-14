@@ -1276,9 +1276,14 @@ void TrafficManager::_Inject(){
                     _netrace_inflight[assigned_pid] = pkt.packet;
                 }
             }
-            if ((_sim_state == draining) && _netrace_adapter->Done() &&
-                _partial_packets[input][default_cl].empty()) {
-                _qdrained[input][default_cl] = true;
+        }
+        if (_netrace_adapter->Done()) {
+            for (int input = 0; input < _nodes; ++input) {
+                for (int c = 0; c < _classes; ++c) {
+                    if (_partial_packets[input][c].empty()) {
+                        _qdrained[input][c] = true;
+                    }
+                }
             }
         }
         return;

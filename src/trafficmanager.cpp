@@ -272,6 +272,13 @@ TrafficManager::TrafficManager( const Configuration &config, const vector<Networ
     _latency_csv_name = config.GetStr("latency_csv");
     _stall_csv_name = config.GetStr("stall_csv");
     _throughput_csv_name = config.GetStr("throughput_csv");
+    _summary_csv_name = config.GetStr("summary_csv");
+    _power_cap = config.GetFloat("power_cap");
+    _dvfs_log_interval = config.GetInt("dvfs_log_interval");
+    if(_dvfs_log_interval <= 0) _dvfs_log_interval = _dvfs_epoch;
+    _dvfs_log_last = 0;
+    _dvfs_power_avg_sum = 0.0;
+    _dvfs_power_avg_count = 0;
     _dvfs_log_out = NULL;
     _dvfs_log_name = config.GetStr("dvfs_log");
     auto ensure_dir = [](const string &path) {
@@ -572,6 +579,7 @@ TrafficManager::TrafficManager( const Configuration &config, const vector<Networ
     _overall_avg_flat.resize(_classes, 0.0);
     _overall_max_flat.resize(_classes, 0.0);
     _flat_pcnt_stats.resize(_classes, static_cast<PercentileStats *>(NULL));
+    _qdel_pcnt_stats.resize(_classes, static_cast<PercentileStats *>(NULL));
 
     _frag_stats.resize(_classes);
     _overall_min_frag.resize(_classes, 0.0);
@@ -637,6 +645,10 @@ TrafficManager::TrafficManager( const Configuration &config, const vector<Networ
         _flat_stats[c] = new Stats( this, tmp_name.str( ), 1.0, 1000 );
         _stats[tmp_name.str()] = _flat_stats[c];
         _flat_pcnt_stats[c] = new PercentileStats();
+        tmp_name.str("");
+
+        tmp_name << "qdel_stat_" << c;
+        _qdel_pcnt_stats[c] = new PercentileStats();
         tmp_name.str("");
 
         tmp_name << "frag_stat_" << c;
@@ -720,6 +732,7 @@ TrafficManager::~TrafficManager( )
         delete _plat_pcnt_stats[c];
         delete _nlat_pcnt_stats[c];
         delete _flat_pcnt_stats[c];
+        delete _qdel_pcnt_stats[c];
         delete _hop_stats[c];
 
         delete _traffic_pattern[c];
@@ -849,14 +862,18 @@ void TrafficManager::_RetireFlit( Flit *f, int dest )
       
             _hop_stats[f->cl]->AddSample( f->hops );
 
-            if((_slowest_packet[f->cl] < 0) ||
-               (_plat_stats[f->cl]->Max() < (f->atime - head->itime)))
-                _slowest_packet[f->cl] = f->pid;
-            _plat_stats[f->cl]->AddSample( f->atime - head->ctime);
-            _nlat_stats[f->cl]->AddSample( f->atime - head->itime);
-            _plat_pcnt_stats[f->cl]->AddSample( f->atime - head->ctime);
-            _nlat_pcnt_stats[f->cl]->AddSample( f->atime - head->itime);
-            _frag_stats[f->cl]->AddSample( (f->atime - head->atime) - (f->id - head->id) );
+        if((_slowest_packet[f->cl] < 0) ||
+           (_plat_stats[f->cl]->Max() < (f->atime - head->itime)))
+            _slowest_packet[f->cl] = f->pid;
+        _plat_stats[f->cl]->AddSample( f->atime - head->ctime);
+        _nlat_stats[f->cl]->AddSample( f->atime - head->itime);
+        _plat_pcnt_stats[f->cl]->AddSample( f->atime - head->ctime);
+        _nlat_pcnt_stats[f->cl]->AddSample( f->atime - head->itime);
+        _frag_stats[f->cl]->AddSample( (f->atime - head->atime) - (f->id - head->id) );
+        int qdel = head->itime - head->ctime;
+        if(qdel >= 0) {
+            _qdel_pcnt_stats[f->cl]->AddSample(qdel);
+        }
    
             if(_pair_stats){
                 _pair_plat[f->cl][f->src*_nodes+dest]->AddSample( f->atime - head->ctime );
@@ -1564,7 +1581,11 @@ void TrafficManager::_MaybeRunDVFS() {
         }
     } ctrl(this);
 
-    if(_dvfs_log_out) {
+    _dvfs_power_avg_sum += _power_telemetry.total_power;
+    _dvfs_power_avg_count++;
+
+    bool do_log = (_time - _dvfs_log_last) >= _dvfs_log_interval;
+    if(do_log && _dvfs_log_out) {
         std::map<int, double> domain_power;
         std::map<int, double> domain_freq;
         for(int r = 0; r < _routers; ++r) {
@@ -1576,6 +1597,9 @@ void TrafficManager::_MaybeRunDVFS() {
         }
         std::ostringstream oss;
         oss << "DVFS epoch t=" << _time << " total_power=" << _power_telemetry.total_power;
+        double headroom = _power_cap > 0 ? (_power_cap - _power_telemetry.total_power) : 0.0;
+        double avg_power = (_dvfs_power_avg_count > 0) ? (_dvfs_power_avg_sum / static_cast<double>(_dvfs_power_avg_count)) : _power_telemetry.total_power;
+        oss << " headroom=" << headroom << " avg_power=" << avg_power;
         oss << " domains{";
         bool first = true;
         for(std::map<int,double>::const_iterator it = domain_power.begin(); it != domain_power.end(); ++it) {
@@ -1594,6 +1618,7 @@ void TrafficManager::_MaybeRunDVFS() {
         if(_dvfs_log_out != &cout) {
             cout << oss.str() << endl;
         }
+        _dvfs_log_last = _time;
     }
 
     _dvfs_policy->Update(_power_telemetry, ctrl, (_dvfs_epoch ? (_time / _dvfs_epoch) : 0));
@@ -1642,6 +1667,7 @@ void TrafficManager::_ClearStats( )
         _plat_pcnt_stats[c]->Clear();
         _nlat_pcnt_stats[c]->Clear();
         _flat_pcnt_stats[c]->Clear();
+        _qdel_pcnt_stats[c]->Clear();
 
         _sent_packets[c].assign(_nodes, 0);
         _accepted_packets[c].assign(_nodes, 0);
@@ -2637,7 +2663,7 @@ void TrafficManager::_WriteCSVs() {
         }
         if(out) {
             double sim_time = static_cast<double>(_time - _reset_time);
-            *out << "class,sent_packets,accepted_packets,sent_flits,accepted_flits,avg_throughput_flits_per_cycle\n";
+            *out << "class,offered_load,sent_packets,accepted_packets,sent_flits,accepted_flits,avg_throughput_flits_per_cycle\n";
             for(int c = 0; c < _classes; ++c) {
                 int sentp = 0, accp = 0, sentf = 0, accf = 0;
                 _ComputeStats(_sent_packets[c], &sentp);
@@ -2645,8 +2671,32 @@ void TrafficManager::_WriteCSVs() {
                 _ComputeStats(_sent_flits[c], &sentf);
                 _ComputeStats(_accepted_flits[c], &accf);
                 double thr = (sim_time > 0) ? (static_cast<double>(accf) / sim_time) : 0.0;
-                *out << c << "," << sentp << "," << accp << "," << sentf << "," << accf << "," << thr << "\n";
+                double offered = (_load.size() > c) ? _load[c] : 0.0;
+                *out << c << "," << offered << "," << sentp << "," << accp << "," << sentf << "," << accf << "," << thr << "\n";
             }
+        }
+    }
+
+    // Summary CSV (one line)
+    string sum_path = make_path(_summary_csv_name);
+    if(!sum_path.empty()) {
+        ostream *out = NULL;
+        ofstream sum_file;
+        if(sum_path == "-") out = &cout;
+        else {
+            sum_file.open(sum_path.c_str());
+            if(sum_file.good()) out = &sum_file;
+        }
+        if(out) {
+            *out << "policy,power_cap,control_p99,batch_p99,total_power_avg\n";
+            double control_p99 = _nlat_pcnt_stats.size() > 0 ? _nlat_pcnt_stats[0]->Percentile(0.99) : 0.0;
+            double batch_p99 = (_classes > 1 && _nlat_pcnt_stats.size() > 1) ? _nlat_pcnt_stats[1]->Percentile(0.99) : 0.0;
+            double avg_power = (_dvfs_power_avg_count > 0) ? (_dvfs_power_avg_sum / static_cast<double>(_dvfs_power_avg_count)) : 0.0;
+            *out << (_dvfs_policy ? _dvfs_policy->GetType() : "unknown") << ","
+                 << _power_cap << ","
+                 << control_p99 << ","
+                 << batch_p99 << ","
+                 << avg_power << "\n";
         }
     }
 }

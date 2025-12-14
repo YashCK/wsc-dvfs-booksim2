@@ -45,4 +45,3 @@ std::unique_ptr<DVFSPolicy> MakeDVFSPolicy(const Configuration &config) {
   }
   return std::unique_ptr<DVFSPolicy>(new UniformDVFSPolicy(1.0));
 }
-

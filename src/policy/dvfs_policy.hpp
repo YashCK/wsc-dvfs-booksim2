@@ -18,6 +18,7 @@ public:
   virtual ~DVFSPolicy() {}
   virtual void Update(const PowerTelemetry &pwr, NetworkControl &net,
                       int epoch) = 0;
+  virtual std::string GetType() const { return "dvfs_policy"; }
 };
 
 class UniformDVFSPolicy : public DVFSPolicy {
@@ -36,6 +37,7 @@ public:
                    double max_scale = 1.0)
       : _cap(power_cap), _min_scale(min_scale), _max_scale(max_scale) {}
   void Update(const PowerTelemetry &pwr, NetworkControl &net, int) override;
+  std::string GetType() const override { return "budget"; }
 
 private:
   double _cap;
@@ -52,6 +54,7 @@ public:
               int epoch) override {
     if (_fn) _fn(pwr, net, epoch);
   }
+  std::string GetType() const override { return "custom"; }
 
 private:
   std::function<void(const PowerTelemetry &, NetworkControl &, int)> _fn;

@@ -218,6 +218,9 @@ BookSimConfig::BookSimConfig( )
   AddStrField("latency_csv", "");
   AddStrField("stall_csv", "");
   AddStrField("throughput_csv", "");
+  AddStrField("summary_csv", "");
+  _float_map["power_cap"] = 0.0;
+  _int_map["dvfs_log_interval"] = 0;
 
   // Orion power modeling (defaults chosen to allow build/run without user config)
   _int_map["use_orion"] = 0;

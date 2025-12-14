@@ -88,6 +88,12 @@ protected:
   std::string _latency_csv_name;
   std::string _stall_csv_name;
   std::string _throughput_csv_name;
+  std::string _summary_csv_name;
+  double _power_cap;
+  int _dvfs_log_interval;
+  long long _dvfs_log_last;
+  double _dvfs_power_avg_sum;
+  long long _dvfs_power_avg_count;
 
   // ============ Traffic ============ 
 
@@ -198,6 +204,7 @@ protected:
   vector<double> _overall_avg_flat;  
   vector<double> _overall_max_flat;  
   vector<PercentileStats *> _flat_pcnt_stats;
+  vector<PercentileStats *> _qdel_pcnt_stats;
 
   vector<Stats *> _frag_stats;
   vector<double> _overall_min_frag;

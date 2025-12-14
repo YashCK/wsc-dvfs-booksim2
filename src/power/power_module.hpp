@@ -102,7 +102,7 @@ protected:
 
   double Ci ;
   double Co ;
-  double Vdd  ;
+  double Vdd_pm  ;
   double FO4   ;		     
   double tCLK ;
   double fCLK ;              

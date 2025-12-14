@@ -36,6 +36,9 @@
 
 #include "router.hpp"
 #include "routefunc.hpp"
+#include "ORION3_0/SIM_router.h"
+#include "ORION3_0/SIM_router_power.h"
+int Flexus_Orion_init(const Configuration& config);
 
 using namespace std;
 
@@ -145,8 +148,15 @@ class IQRouter : public Router {
   //
   // ----------------------------------------
 
+  bool _orion_enabled;
+  SIM_router_info_t _orion_info;
+  SIM_router_power_t _orion_power;
+  double _orion_vdd;
+  double _orion_freq_hz;
   SwitchMonitor * _switchMonitor ;
   BufferMonitor * _bufferMonitor ;
+  double _ComputeOrionPower(double freq_scale);
+  void _ResetMonitors();
   
 public:
 
@@ -177,6 +187,8 @@ public:
 
   SwitchMonitor const * const GetSwitchMonitor() const {return _switchMonitor;}
   BufferMonitor const * const GetBufferMonitor() const {return _bufferMonitor;}
+  double GetOrionPower(double freq_scale) { return _ComputeOrionPower(freq_scale); }
+  void ResetPowerMonitors() { _ResetMonitors(); }
 
 };
 

@@ -41,6 +41,7 @@
 #include "packet_reply_info.hpp"
 #include "policy/policy_factory.hpp"
 #include <cmath>
+#include "routers/iq_router.hpp"
 
 TrafficManager * TrafficManager::New(Configuration const & config,
                                      vector<Network *> const & net)
@@ -263,6 +264,22 @@ TrafficManager::TrafficManager( const Configuration &config, const vector<Networ
     _dvfs_voltages.resize(_dvfs_freqs.size(), _dvfs_voltages.back());
     _power_dyn_base = config.GetFloat("power_dyn_base");
     _power_leak_base = config.GetFloat("power_leak_base");
+    _use_orion = config.GetInt("use_orion") > 0;
+    _dvfs_log_out = NULL;
+    _dvfs_log_name = config.GetStr("dvfs_log");
+    if(!_dvfs_log_name.empty()) {
+        if(_dvfs_log_name == "-") {
+            _dvfs_log_out = &cout;
+        } else {
+            std::ofstream *out = new ofstream(_dvfs_log_name.c_str());
+            if(out->good()) {
+                _dvfs_log_out = out;
+            } else {
+                delete out;
+                _dvfs_log_out = NULL;
+            }
+        }
+    }
 
     vector<string> injection_process = config.GetStrArray("injection_process");
     injection_process.resize(_classes, injection_process.back());
@@ -686,6 +703,9 @@ TrafficManager::~TrafficManager( )
   
     if(gWatchOut && (gWatchOut != &cout)) delete gWatchOut;
     if(_stats_out && (_stats_out != &cout)) delete _stats_out;
+    if(_dvfs_log_out && (_dvfs_log_out != &cout)) {
+        delete static_cast<std::ofstream*>(_dvfs_log_out);
+    }
 
 #ifdef TRACK_FLOWS
     if(_injected_flits_out) delete _injected_flits_out;
@@ -1449,31 +1469,45 @@ void TrafficManager::_MaybeRunDVFS() {
     }
     _last_dvfs_epoch = _time;
 
-    double base_freq = _dvfs_freqs.empty() ? 1.0 : _dvfs_freqs[0];
     _power_telemetry.total_power = 0.0;
     _power_telemetry.router_power.assign(_routers, 0.0);
-    auto nearest_voltage = [&](double freq)->double {
-        double best_v = _dvfs_voltages.empty() ? 1.0 : _dvfs_voltages.back();
-        if(_dvfs_freqs.empty() || _dvfs_voltages.empty()) return best_v;
-        double best_err = fabs(freq - _dvfs_freqs[0]);
-        best_v = _dvfs_voltages[0];
-        for(size_t i = 0; i < _dvfs_freqs.size(); ++i) {
-            double err = fabs(freq - _dvfs_freqs[i]);
-            if(err < best_err) {
-                best_err = err;
-                best_v = _dvfs_voltages[i];
+    if(_use_orion) {
+        for(int r = 0; r < _routers; ++r) {
+            IQRouter *iqr = dynamic_cast<IQRouter *>(_router[0][r]);
+            double freq_scale = _router_freq_scale[r];
+            double p = 0.0;
+            if(iqr) {
+                p = iqr->GetOrionPower(freq_scale);
+                iqr->ResetPowerMonitors();
             }
+            _power_telemetry.router_power[r] = p;
+            _power_telemetry.total_power += p;
         }
-        return best_v;
-    };
-    for(int r = 0; r < _routers; ++r) {
-        double freq = base_freq * _router_freq_scale[r];
-        double v = nearest_voltage(freq);
-        double dyn = _power_dyn_base * v * v * freq;
-        double leak = _power_leak_base * v;
-        double p = dyn + leak;
-        _power_telemetry.router_power[r] = p;
-        _power_telemetry.total_power += p;
+    } else {
+        double base_freq = _dvfs_freqs.empty() ? 1.0 : _dvfs_freqs[0];
+        auto nearest_voltage = [&](double freq)->double {
+            double best_v = _dvfs_voltages.empty() ? 1.0 : _dvfs_voltages.back();
+            if(_dvfs_freqs.empty() || _dvfs_voltages.empty()) return best_v;
+            double best_err = fabs(freq - _dvfs_freqs[0]);
+            best_v = _dvfs_voltages[0];
+            for(size_t i = 0; i < _dvfs_freqs.size(); ++i) {
+                double err = fabs(freq - _dvfs_freqs[i]);
+                if(err < best_err) {
+                    best_err = err;
+                    best_v = _dvfs_voltages[i];
+                }
+            }
+            return best_v;
+        };
+        for(int r = 0; r < _routers; ++r) {
+            double freq = base_freq * _router_freq_scale[r];
+            double v = nearest_voltage(freq);
+            double dyn = _power_dyn_base * v * v * freq;
+            double leak = _power_leak_base * v;
+            double p = dyn + leak;
+            _power_telemetry.router_power[r] = p;
+            _power_telemetry.total_power += p;
+        }
     }
 
     struct TMControl : public NetworkControl {
@@ -1495,6 +1529,38 @@ void TrafficManager::_MaybeRunDVFS() {
             }
         }
     } ctrl(this);
+
+    if(_dvfs_log_out) {
+        std::map<int, double> domain_power;
+        std::map<int, double> domain_freq;
+        for(int r = 0; r < _routers; ++r) {
+            int d = _router_domains[r];
+            domain_power[d] += _power_telemetry.router_power[r];
+            if(domain_freq.find(d) == domain_freq.end()) {
+                domain_freq[d] = _router_freq_scale[r];
+            }
+        }
+        std::ostringstream oss;
+        oss << "DVFS epoch t=" << _time << " total_power=" << _power_telemetry.total_power;
+        oss << " domains{";
+        bool first = true;
+        for(std::map<int,double>::const_iterator it = domain_power.begin(); it != domain_power.end(); ++it) {
+            if(!first) oss << ", ";
+            first = false;
+            int d = it->first;
+            oss << d << ":freq=" << domain_freq[d] << ",power=" << it->second;
+        }
+        oss << "} routers{";
+        for(int r = 0; r < _routers; ++r) {
+            if(r) oss << ", ";
+            oss << r << ":freq=" << _router_freq_scale[r] << ",power=" << _power_telemetry.router_power[r];
+        }
+        oss << "}";
+        *_dvfs_log_out << oss.str() << endl;
+        if(_dvfs_log_out != &cout) {
+            cout << oss.str() << endl;
+        }
+    }
 
     _dvfs_policy->Update(_power_telemetry, ctrl, (_dvfs_epoch ? (_time / _dvfs_epoch) : 0));
 }

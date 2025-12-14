@@ -48,6 +48,7 @@ public:
   vector<int> const & GetActivity() const {
     return _event;
   }
+  inline int NumCycles() const { return _cycles; }
   inline int const & NumInputs() const {
     return _inputs;
   }
@@ -57,6 +58,7 @@ public:
   inline int const & NumClasses() const {
     return _classes;
   }
+  void Reset();
   void traversal( int input, int output, Flit const * f ) ;
   void display(ostream & os) const;
 } ;

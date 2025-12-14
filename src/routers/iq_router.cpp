@@ -47,6 +47,8 @@
 #include "switch_monitor.hpp"
 #include "buffer_monitor.hpp"
 
+#include "ORION3_0/SIM_port.h"
+
 IQRouter::IQRouter( Configuration const & config, Module *parent, 
 		    string const & name, int id, int inputs, int outputs )
 : Router( config, parent, name, id, inputs, outputs ), _active(false)
@@ -61,6 +63,9 @@ IQRouter::IQRouter( Configuration const & config, Module *parent,
   _spec_check_elig = (config.GetInt("spec_check_elig") > 0);
   _spec_check_cred = (config.GetInt("spec_check_cred") > 0);
   _spec_mask_by_reqs = (config.GetInt("spec_mask_by_reqs") > 0);
+  _orion_enabled = (config.GetInt("use_orion") > 0);
+  _orion_vdd = config.GetFloat("Vdd");
+  _orion_freq_hz = config.GetFloat("Orion_Freq");
 
   _routing_delay    = config.GetInt( "routing_delay" );
   _vc_alloc_delay   = config.GetInt( "vc_alloc_delay" );
@@ -178,6 +183,37 @@ IQRouter::IQRouter( Configuration const & config, Module *parent,
   }
   _outstanding_classes.resize(_outputs, vector<queue<int> >(_vcs));
 #endif
+
+  if(_orion_enabled) {
+    PARM_Vdd = _orion_vdd;
+    PARM_tr = config.GetFloat("Orion_tr");
+    PARM_Freq = _orion_freq_hz;
+    PARM_in_port = _inputs;
+    PARM_out_port = _outputs;
+    PARM_flit_width = config.GetInt("Orion_bitwidth");
+    if(PARM_flit_width <= 0) PARM_flit_width = 128;
+    PARM_v_class = config.GetInt("Orion_vc_class");
+    PARM_v_channel = _vcs;
+    PARM_in_share_buf = config.GetInt("Orion_IsSharedBuffIn");
+    PARM_out_share_buf = config.GetInt("Orion_IsSharedBuffOut");
+    PARM_crossbar_model = config.GetInt("Orion_crossbar_model");
+    PARM_crsbar_degree = config.GetInt("Orion_crsbar_degree");
+    PARM_connect_type = config.GetInt("Orion_Cxbar_Cxpoint");
+    PARM_trans_type = config.GetInt("Orion_trans_type");
+    PARM_in_buf = config.GetInt("Orion_IsInBuff");
+    PARM_in_buf_set = config.GetInt("vc_buf_size");
+    PARM_in_buffer_type = config.GetInt("Orion_buff_type");
+    PARM_out_buf = config.GetInt("Orion_IsOutBuff");
+    PARM_out_buf_set = config.GetInt("Orion_out_buf_size");
+    PARM_out_buffer_type = config.GetInt("Orion_buff_type");
+    PARM_sw_in_arb_model = config.GetInt("Orion_in_arb_model");
+    PARM_sw_out_arb_model = config.GetInt("Orion_out_arb_model");
+    PARM_vc_allocator_type = config.GetInt("Orion_allocator_model");
+    PARM_vc_in_arb_model = config.GetInt("Orion_in_vc_arb_model");
+    PARM_vc_out_arb_model = config.GetInt("Orion_out_vc_arb_model");
+    Flexus_Orion_init(config);
+    SIM_router_init(&_orion_info, &_orion_power, NULL);
+  }
 }
 
 IQRouter::~IQRouter( )
@@ -2382,4 +2418,23 @@ void IQRouter::_UpdateNOQ(int input, int vc, Flit const * f) {
 		 << " (NOQ)." << endl;
     }
   }
+}
+
+double IQRouter::_ComputeOrionPower(double freq_scale) {
+  if(!_orion_enabled) return 0.0;
+  double freq = _orion_freq_hz * freq_scale;
+  int cycles = _switchMonitor->NumCycles();
+  if(cycles <= 0) return 0.0;
+  int total_events = 0;
+  const vector<int> & act = _switchMonitor->GetActivity();
+  for(size_t i = 0; i < act.size(); ++i) total_events += act[i];
+  double e_fin = static_cast<double>(total_events) / (static_cast<double>(_inputs) * static_cast<double>(cycles) + 1e-12);
+  double e_avg = SIM_router_stat_energy(&_orion_info, &_orion_power, -1, NULL, 0, e_fin, 0, freq);
+  double power = e_avg * freq;
+  return power;
+}
+
+void IQRouter::_ResetMonitors() {
+  _switchMonitor->Reset();
+  _bufferMonitor->Reset();
 }

@@ -201,11 +201,41 @@ BookSimConfig::BookSimConfig( )
   AddStrField( "priority", "none" );  // message priorities
   _int_map["dvfs_epoch"] = 0; // number of cycles between DVFS updates; 0 disables
   _float_map["power_cap"] = 0.0; // optional power cap for DVFS policies
+  _int_map["router_domains"] = 0;
   AddStrField("router_domains", ""); // optional router->domain mapping
-  AddStrField("dvfs_freqs", ""); // e.g., "1.0,0.75,0.5"
-  AddStrField("dvfs_voltages", ""); // e.g., "1.0,0.9,0.8"
+  // DVFS frequency/voltage tables (single or list); allow numeric tokens
+  _float_map["dvfs_freqs"] = 1.0;
+  AddStrField("dvfs_freqs", ""); // e.g., "1.0 0.75 0.5"
+  _float_map["dvfs_voltages"] = 1.0;
+  AddStrField("dvfs_voltages", ""); // e.g., "1.0 0.9 0.8"
   _float_map["power_dyn_base"] = 1.0; // arbitrary base dynamic power per router
   _float_map["power_leak_base"] = 0.1; // arbitrary base leakage per router
+  AddStrField("dvfs_log", ""); // optional DVFS/power log file
+
+  // Orion power modeling (defaults chosen to allow build/run without user config)
+  _int_map["use_orion"] = 0;
+  _float_map["Vdd"] = 1.0;
+  _float_map["Orion_tr"] = 0.2;
+  _float_map["Orion_Freq"] = 1e9;
+  _int_map["Orion_inport"] = 5;
+  _int_map["Orion_outport"] = 5;
+  _int_map["Orion_bitwidth"] = 128;
+  _int_map["Orion_vc_class"] = 1;
+  _int_map["Orion_IsSharedBuffIn"] = 0;
+  _int_map["Orion_IsSharedBuffOut"] = 0;
+  _int_map["Orion_crossbar_model"] = 0;
+  _int_map["Orion_crsbar_degree"] = 4;
+  _int_map["Orion_Cxbar_Cxpoint"] = 0;
+  _int_map["Orion_trans_type"] = 0;
+  _int_map["Orion_IsInBuff"] = 1;
+  _int_map["Orion_out_buf_size"] = 0;
+  _int_map["Orion_IsOutBuff"] = 0;
+  _int_map["Orion_buff_type"] = 0; // SRAM
+  _int_map["Orion_in_arb_model"] = 1; // RR
+  _int_map["Orion_out_arb_model"] = 1;
+  _int_map["Orion_allocator_model"] = 1; // two-stage
+  _int_map["Orion_in_vc_arb_model"] = 1;
+  _int_map["Orion_out_vc_arb_model"] = 1;
 
   _int_map["batch_size"] = 1000;
   _int_map["batch_count"] = 1;

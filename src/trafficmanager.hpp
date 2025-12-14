@@ -33,6 +33,8 @@
 #include <set>
 #include <cassert>
 #include <memory>
+#include <fstream>
+#include <sstream>
 #include <unordered_map>
 
 #include "module.hpp"
@@ -77,6 +79,9 @@ protected:
   vector<double> _dvfs_voltages;
   double _power_dyn_base;
   double _power_leak_base;
+  bool _use_orion;
+  std::ostream * _dvfs_log_out;
+  std::string _dvfs_log_name;
 
   // ============ Traffic ============ 
 

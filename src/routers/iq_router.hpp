@@ -38,6 +38,8 @@
 #include "routefunc.hpp"
 #include "ORION3_0/SIM_router.h"
 #include "ORION3_0/SIM_router_power.h"
+#include "ORION3_0/SIM_misc.h"
+#include "ORION3_0/SIM_misc_model.h"
 int Flexus_Orion_init(const Configuration& config);
 
 using namespace std;
@@ -153,6 +155,10 @@ class IQRouter : public Router {
   SIM_router_power_t _orion_power;
   double _orion_vdd;
   double _orion_freq_hz;
+  double _orion_link_length;
+  int _orion_flit_width;
+  SIM_bus_t _orion_link_bus;
+  bool _orion_link_bus_valid;
   SwitchMonitor * _switchMonitor ;
   BufferMonitor * _bufferMonitor ;
   double _ComputeOrionPower(double freq_scale);

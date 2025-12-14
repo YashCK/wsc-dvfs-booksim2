@@ -241,6 +241,7 @@ BookSimConfig::BookSimConfig( )
   _int_map["Orion_out_buf_size"] = 0;
   _int_map["Orion_IsOutBuff"] = 0;
   _int_map["Orion_buff_type"] = 0; // SRAM
+  _float_map["wire_length"] = 1.0; // used for Orion link modeling
   _int_map["Orion_in_arb_model"] = 1; // RR
   _int_map["Orion_out_arb_model"] = 1;
   _int_map["Orion_allocator_model"] = 1; // two-stage

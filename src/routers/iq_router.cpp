@@ -34,6 +34,7 @@
 #include <cstdlib>
 #include <cassert>
 #include <limits>
+#include <numeric>
 
 #include "globals.hpp"
 #include "random_utils.hpp"
@@ -51,7 +52,8 @@
 
 IQRouter::IQRouter( Configuration const & config, Module *parent, 
 		    string const & name, int id, int inputs, int outputs )
-: Router( config, parent, name, id, inputs, outputs ), _active(false)
+: Router( config, parent, name, id, inputs, outputs ), _active(false),
+  _orion_link_length(1.0), _orion_flit_width(0), _orion_link_bus_valid(false)
 {
   _vcs         = config.GetInt( "num_vcs" );
 
@@ -66,6 +68,10 @@ IQRouter::IQRouter( Configuration const & config, Module *parent,
   _orion_enabled = (config.GetInt("use_orion") > 0);
   _orion_vdd = config.GetFloat("Vdd");
   _orion_freq_hz = config.GetFloat("Orion_Freq");
+  _orion_link_length = config.GetFloat("wire_length");
+  if(_orion_link_length <= 0.0) _orion_link_length = 1.0;
+  _orion_flit_width = config.GetInt("Orion_bitwidth");
+  if(_orion_flit_width <= 0) _orion_flit_width = 128;
 
   _routing_delay    = config.GetInt( "routing_delay" );
   _vc_alloc_delay   = config.GetInt( "vc_alloc_delay" );
@@ -213,6 +219,10 @@ IQRouter::IQRouter( Configuration const & config, Module *parent,
     PARM_vc_out_arb_model = config.GetInt("Orion_out_vc_arb_model");
     Flexus_Orion_init(config);
     SIM_router_init(&_orion_info, &_orion_power, NULL);
+    _orion_flit_width = PARM_flit_width;
+    if(SIM_bus_init(&_orion_link_bus, GENERIC_BUS, IDENT_ENC, _orion_flit_width, _orion_flit_width, 1, 1, _orion_link_length, 0.0) == 0) {
+      _orion_link_bus_valid = true;
+    }
   }
 }
 
@@ -2425,17 +2435,47 @@ double IQRouter::_ComputeOrionPower(double freq_scale) {
   double freq = _orion_freq_hz * freq_scale;
   int cycles = _switchMonitor->NumCycles();
   if(cycles <= 0) return 0.0;
-  // Estimate average flits per input per cycle using buffer writes (closer to actual ingress)
-  int total_writes = 0;
+  // Estimate activity using both ingress (writes) and egress (reads)
+  long long total_writes = 0;
+  long long total_reads = 0;
   const vector<int> & writes = _bufferMonitor->GetWrites();
+  const vector<int> & reads = _bufferMonitor->GetReads();
   for(size_t i = 0; i < writes.size(); ++i) total_writes += writes[i];
-  double e_fin = static_cast<double>(total_writes) / (static_cast<double>(_inputs) * static_cast<double>(cycles) + 1e-12);
+  for(size_t i = 0; i < reads.size(); ++i) total_reads += reads[i];
+  double norm = static_cast<double>(_inputs) * static_cast<double>(cycles);
+  double ingress = (norm > 0.0) ? (static_cast<double>(total_writes) / norm) : 0.0;
+  double egress = (norm > 0.0) ? (static_cast<double>(total_reads) / norm) : 0.0;
+  double e_fin = std::max(ingress, egress);
   double e_avg = SIM_router_stat_energy(&_orion_info, &_orion_power, -1, NULL, 0, e_fin, 0, freq);
-  double power = e_avg * freq;
-  return power;
+  double router_power = e_avg * freq;
+
+  // Add a simple Orion-based link energy model using observed flit activity.
+  double link_power = 0.0;
+  if(_orion_link_bus_valid && cycles > 0) {
+    double link_energy = 0.0;
+    double toggles_per_flit = 0.5 * static_cast<double>(_orion_link_bus.bit_width); // assume random data
+    for(int o = 0; o < _outputs; ++o) {
+      const FlitChannel * channel = _output_channels[o];
+      if(!channel) continue;
+      const vector<int> & activity = channel->GetActivity();
+      long long flits = 0;
+      for(size_t i = 0; i < activity.size(); ++i) {
+        flits += activity[i];
+      }
+      link_energy += static_cast<double>(flits) * toggles_per_flit * _orion_link_bus.e_switch;
+    }
+    link_power = link_energy * freq / static_cast<double>(cycles);
+  }
+
+  return router_power + link_power;
 }
 
 void IQRouter::_ResetMonitors() {
   _switchMonitor->Reset();
   _bufferMonitor->Reset();
+  for(int o = 0; o < _outputs; ++o) {
+    if(_output_channels[o]) {
+      _output_channels[o]->ResetActivity();
+    }
+  }
 }

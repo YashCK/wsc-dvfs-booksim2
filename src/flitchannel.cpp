@@ -36,6 +36,7 @@
 
 #include <iostream>
 #include <iomanip>
+#include <algorithm>
 
 #include "router.hpp"
 #include "globals.hpp"
@@ -88,4 +89,9 @@ void FlitChannel::WriteOutputs() {
 	       << "Completed channel traversal for flit " << _output->id
 	       << "." << endl;
   }
+}
+
+void FlitChannel::ResetActivity() {
+  std::fill(_active.begin(), _active.end(), 0);
+  _idle = 0;
 }

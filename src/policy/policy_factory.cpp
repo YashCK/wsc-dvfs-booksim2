@@ -34,8 +34,14 @@ std::unique_ptr<PriorityPolicy> MakePriorityPolicy(
 std::unique_ptr<DVFSPolicy> MakeDVFSPolicy(const Configuration &config) {
   string mode = config.GetStr("dvfs_policy");
   double cap = config.GetFloat("power_cap");
+  vector<double> min_scales = config.GetFloatArray("dvfs_min_scale");
+  if(min_scales.empty()) min_scales.push_back(config.GetFloat("dvfs_min_scale"));
+  vector<double> max_scales = config.GetFloatArray("dvfs_max_scale");
+  if(max_scales.empty()) max_scales.push_back(config.GetFloat("dvfs_max_scale"));
+  double min_scale = min_scales.front();
+  double max_scale = max_scales.front();
   if (mode == "budget") {
-    return std::unique_ptr<DVFSPolicy>(new BudgetDVFSPolicy(cap));
+    return std::unique_ptr<DVFSPolicy>(new BudgetDVFSPolicy(cap, min_scale, max_scale));
   }
   if (mode == "uniform" || mode.empty()) {
     return std::unique_ptr<DVFSPolicy>(new UniformDVFSPolicy(1.0));

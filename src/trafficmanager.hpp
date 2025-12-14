@@ -77,6 +77,11 @@ protected:
   vector<double> _router_freq_scale;
   vector<double> _dvfs_freqs;
   vector<double> _dvfs_voltages;
+  vector<vector<double> > _domain_freqs;
+  vector<vector<double> > _domain_voltages;
+  vector<double> _domain_min_scale;
+  vector<double> _domain_max_scale;
+  int _num_domains;
   double _power_dyn_base;
   double _power_leak_base;
   bool _use_orion;
@@ -168,6 +173,7 @@ protected:
   int _dvfs_epoch;
   long long _last_dvfs_epoch;
   std::ostream * _energy_out;
+  double _ClampDomainScale(int domain, double scale) const;
   PowerTelemetry _power_telemetry;
 
   // ============ physical sub-networks ==========

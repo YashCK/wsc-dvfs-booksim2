@@ -424,12 +424,61 @@ TrafficManager::TrafficManager( const Configuration &config, const vector<Networ
         _router_domains.assign(_routers, config.GetInt("router_domains"));
     }
     _router_domains.resize(_routers, _router_domains.back());
+    _num_domains = 0;
+    for(size_t i = 0; i < _router_domains.size(); ++i) {
+        _num_domains = std::max(_num_domains, _router_domains[i] + 1);
+    }
+    if(_num_domains <= 0) _num_domains = 1;
+    vector<double> min_scales = config.GetFloatArray("dvfs_min_scale");
+    if(min_scales.empty()) min_scales.push_back(config.GetFloat("dvfs_min_scale"));
+    vector<double> max_scales = config.GetFloatArray("dvfs_max_scale");
+    if(max_scales.empty()) max_scales.push_back(config.GetFloat("dvfs_max_scale"));
+    _domain_min_scale.resize(_num_domains, min_scales.back());
+    _domain_max_scale.resize(_num_domains, max_scales.back());
+    for(int d = 0; d < _num_domains; ++d) {
+        if(d < static_cast<int>(min_scales.size())) _domain_min_scale[d] = min_scales[d];
+        if(d < static_cast<int>(max_scales.size())) _domain_max_scale[d] = max_scales[d];
+        if(_domain_max_scale[d] < _domain_min_scale[d]) std::swap(_domain_max_scale[d], _domain_min_scale[d]);
+    }
+    auto parse_domain_lists = [](const string &s)->vector<vector<double> > {
+        vector<vector<double> > res;
+        if(s.empty()) return res;
+        size_t start = 0;
+        while(true) {
+            size_t end = s.find('|', start);
+            string chunk = s.substr(start, (end == string::npos) ? string::npos : (end - start));
+            res.push_back(tokenize_float(chunk));
+            if(end == string::npos) break;
+            start = end + 1;
+        }
+        return res;
+    };
+    vector<vector<double> > dom_freq_lists = parse_domain_lists(config.GetStr("dvfs_domain_freqs"));
+    vector<vector<double> > dom_volt_lists = parse_domain_lists(config.GetStr("dvfs_domain_voltages"));
+    _domain_freqs.assign(_num_domains, _dvfs_freqs);
+    _domain_voltages.assign(_num_domains, _dvfs_voltages);
+    for(int d = 0; d < _num_domains; ++d) {
+        if(d < static_cast<int>(dom_freq_lists.size()) && !dom_freq_lists[d].empty()) {
+            _domain_freqs[d] = dom_freq_lists[d];
+        }
+        if(d < static_cast<int>(dom_volt_lists.size()) && !dom_volt_lists[d].empty()) {
+            _domain_voltages[d] = dom_volt_lists[d];
+        }
+        if(_domain_voltages[d].empty()) {
+            _domain_voltages[d].push_back(1.0);
+        }
+        _domain_voltages[d].resize(_domain_freqs[d].size(), _domain_voltages[d].back());
+    }
     for(int subnet = 0; subnet < _subnets; ++subnet) {
         for(int r = 0; r < _routers; ++r) {
             _router[subnet][r]->SetFrequencyDomain(_router_domains[r]);
         }
     }
     _router_freq_scale.assign(_routers, 1.0);
+    for(int r = 0; r < _routers; ++r) {
+        int d = _router_domains[r];
+        _router_freq_scale[r] = _ClampDomainScale(d, _router_freq_scale[r]);
+    }
 
     //seed the network
     int seed;
@@ -1532,8 +1581,18 @@ void TrafficManager::_Step( )
     assert(_time);
     if(gTrace){
         cout<<"TIME "<<_time<<endl;
-    }
+  }
 
+}
+
+double TrafficManager::_ClampDomainScale(int domain, double scale) const {
+    if(domain < 0 || domain >= _num_domains) return scale;
+    double lo = _domain_min_scale[domain];
+    double hi = _domain_max_scale[domain];
+    if(hi < lo) std::swap(hi, lo);
+    if(scale < lo) scale = lo;
+    if(scale > hi) scale = hi;
+    return scale;
 }
 
 void TrafficManager::_MaybeRunDVFS() {
@@ -1575,22 +1634,25 @@ void TrafficManager::_MaybeRunDVFS() {
             _power_telemetry.total_power += p;
         }
     } else {
-        double base_freq = _dvfs_freqs.empty() ? 1.0 : _dvfs_freqs[0];
-        auto nearest_voltage = [&](double freq)->double {
-            double best_v = _dvfs_voltages.empty() ? 1.0 : _dvfs_voltages.back();
-            if(_dvfs_freqs.empty() || _dvfs_voltages.empty()) return best_v;
-            double best_err = fabs(freq - _dvfs_freqs[0]);
-            best_v = _dvfs_voltages[0];
-            for(size_t i = 0; i < _dvfs_freqs.size(); ++i) {
-                double err = fabs(freq - _dvfs_freqs[i]);
-                if(err < best_err) {
-                    best_err = err;
-                    best_v = _dvfs_voltages[i];
-                }
-            }
-            return best_v;
-        };
         for(int r = 0; r < _routers; ++r) {
+            int domain = _router_domains[r];
+            const vector<double> &freqs = (domain >= 0 && domain < _num_domains && !_domain_freqs[domain].empty()) ? _domain_freqs[domain] : _dvfs_freqs;
+            const vector<double> &volts = (domain >= 0 && domain < _num_domains && !_domain_voltages[domain].empty()) ? _domain_voltages[domain] : _dvfs_voltages;
+            double base_freq = freqs.empty() ? 1.0 : freqs[0];
+            auto nearest_voltage = [&](double freq)->double {
+                double best_v = volts.empty() ? 1.0 : volts.back();
+                if(freqs.empty() || volts.empty()) return best_v;
+                double best_err = fabs(freq - freqs[0]);
+                best_v = volts[0];
+                for(size_t i = 0; i < freqs.size(); ++i) {
+                    double err = fabs(freq - freqs[i]);
+                    if(err < best_err) {
+                        best_err = err;
+                        best_v = volts[i];
+                    }
+                }
+                return best_v;
+            };
             double freq = base_freq * _router_freq_scale[r];
             double v = nearest_voltage(freq);
             double dyn = _power_dyn_base * v * v * freq;
@@ -1608,16 +1670,19 @@ void TrafficManager::_MaybeRunDVFS() {
         TrafficManager* tm;
         void SetRouterSpeed(int router_id, double freq_scale) override {
             if((router_id < 0) || (router_id >= tm->_routers)) return;
-            tm->_router_freq_scale[router_id] = freq_scale;
+            int domain = tm->_router_domains[router_id];
+            double clamped = tm->_ClampDomainScale(domain, freq_scale);
+            tm->_router_freq_scale[router_id] = clamped;
             for(int subnet = 0; subnet < tm->_subnets; ++subnet) {
-                tm->_router[subnet][router_id]->SetFrequencyScale(freq_scale);
+                tm->_router[subnet][router_id]->SetFrequencyScale(clamped);
             }
         }
         void SetDomainSpeed(int domain_id, double freq_scale) override {
             for(size_t r = 0; r < tm->_router_domains.size(); ++r) {
                 if(tm->_router_domains[r] == domain_id) {
-                    tm->_router_freq_scale[r] = freq_scale;
-                    SetRouterSpeed(static_cast<int>(r), freq_scale);
+                    double clamped = tm->_ClampDomainScale(domain_id, freq_scale);
+                    tm->_router_freq_scale[r] = clamped;
+                    SetRouterSpeed(static_cast<int>(r), clamped);
                 }
             }
         }

@@ -208,6 +208,12 @@ BookSimConfig::BookSimConfig( )
   AddStrField("dvfs_freqs", ""); // e.g., "1.0 0.75 0.5"
   _float_map["dvfs_voltages"] = 1.0;
   AddStrField("dvfs_voltages", ""); // e.g., "1.0 0.9 0.8"
+  _float_map["dvfs_min_scale"] = 0.5;
+  AddStrField("dvfs_min_scale", "");
+  _float_map["dvfs_max_scale"] = 1.0;
+  AddStrField("dvfs_max_scale", "");
+  AddStrField("dvfs_domain_freqs", ""); // semicolon-separated per-domain lists, e.g., "1.0 0.8;1.0 0.6"
+  AddStrField("dvfs_domain_voltages", ""); // semicolon-separated per-domain voltage lists
   _float_map["power_dyn_base"] = 1.0; // arbitrary base dynamic power per router
   _float_map["power_leak_base"] = 0.1; // arbitrary base leakage per router
   AddStrField("dvfs_log", ""); // optional DVFS/power log file

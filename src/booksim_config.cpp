@@ -215,6 +215,9 @@ BookSimConfig::BookSimConfig( )
   // Output directories/names
   AddStrField("output_dir", "sims");
   AddStrField("run_name", "run");
+  AddStrField("latency_csv", "");
+  AddStrField("stall_csv", "");
+  AddStrField("throughput_csv", "");
 
   // Orion power modeling (defaults chosen to allow build/run without user config)
   _int_map["use_orion"] = 0;

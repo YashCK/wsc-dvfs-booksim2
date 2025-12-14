@@ -269,6 +269,9 @@ TrafficManager::TrafficManager( const Configuration &config, const vector<Networ
     _use_orion = config.GetInt("use_orion") > 0;
     _output_dir = config.GetStr("output_dir");
     _run_name = config.GetStr("run_name");
+    _latency_csv_name = config.GetStr("latency_csv");
+    _stall_csv_name = config.GetStr("stall_csv");
+    _throughput_csv_name = config.GetStr("throughput_csv");
     _dvfs_log_out = NULL;
     _dvfs_log_name = config.GetStr("dvfs_log");
     auto ensure_dir = [](const string &path) {
@@ -287,6 +290,7 @@ TrafficManager::TrafficManager( const Configuration &config, const vector<Networ
         base_dir += "/" + _run_name;
     }
     ensure_dir(base_dir);
+    _base_output_dir = base_dir;
     string dvfs_path;
     if(!_dvfs_log_name.empty()) {
         if(_dvfs_log_name == "-") {
@@ -2017,6 +2021,8 @@ bool TrafficManager::Run( )
     if(_print_csv_results) {
         DisplayOverallStatsCSV();
     }
+
+    _WriteCSVs();
   
     return true;
 }
@@ -2554,6 +2560,94 @@ string TrafficManager::_OverallStatsCSV(int c) const
 void TrafficManager::DisplayOverallStatsCSV(ostream & os) const {
     for(int c = 0; c < _classes; ++c) {
         os << "results:" << c << ',' << _OverallStatsCSV() << endl;
+    }
+}
+
+void TrafficManager::_WriteCSVs() {
+    string base_dir = _base_output_dir.empty() ? "sims" : _base_output_dir;
+    auto make_path = [&](const string &fname)->string {
+        if(fname.empty()) return "";
+        if(fname == "-") return "-";
+        if(!fname.empty() && fname[0] == '/') return fname;
+        return base_dir + "/" + fname;
+    };
+
+    // Latency percentiles per class
+    string lat_path = make_path(_latency_csv_name);
+    if(!lat_path.empty()) {
+        ostream *out = NULL;
+        ofstream lat_file;
+        if(lat_path == "-") {
+            out = &cout;
+        } else {
+            lat_file.open(lat_path.c_str());
+            if(lat_file.good()) out = &lat_file;
+        }
+        if(out) {
+            *out << "class,plat_p50,plat_p95,plat_p99,nlat_p50,nlat_p95,nlat_p99,flat_p50,flat_p95,flat_p99\n";
+            for(int c = 0; c < _classes; ++c) {
+                double plat50 = _plat_pcnt_stats[c]->Percentile(0.50);
+                double plat95 = _plat_pcnt_stats[c]->Percentile(0.95);
+                double plat99 = _plat_pcnt_stats[c]->Percentile(0.99);
+                double nlat50 = _nlat_pcnt_stats[c]->Percentile(0.50);
+                double nlat95 = _nlat_pcnt_stats[c]->Percentile(0.95);
+                double nlat99 = _nlat_pcnt_stats[c]->Percentile(0.99);
+                double flat50 = _flat_pcnt_stats[c]->Percentile(0.50);
+                double flat95 = _flat_pcnt_stats[c]->Percentile(0.95);
+                double flat99 = _flat_pcnt_stats[c]->Percentile(0.99);
+                *out << c << "," << plat50 << "," << plat95 << "," << plat99 << ","
+                     << nlat50 << "," << nlat95 << "," << nlat99 << ","
+                     << flat50 << "," << flat95 << "," << flat99 << "\n";
+            }
+        }
+    }
+
+#ifdef TRACK_STALLS
+    string stall_path = make_path(_stall_csv_name);
+    if(!stall_path.empty()) {
+        ostream *out = NULL;
+        ofstream stall_file;
+        if(stall_path == "-") out = &cout;
+        else {
+            stall_file.open(stall_path.c_str());
+            if(stall_file.good()) out = &stall_file;
+        }
+        if(out) {
+            *out << "class,buffer_busy,buffer_conflict,buffer_full,buffer_reserved,crossbar_conflict\n";
+            for(int c = 0; c < _classes; ++c) {
+                *out << c << ","
+                     << _overall_buffer_busy_stalls[c] << ","
+                     << _overall_buffer_conflict_stalls[c] << ","
+                     << _overall_buffer_full_stalls[c] << ","
+                     << _overall_buffer_reserved_stalls[c] << ","
+                     << _overall_crossbar_conflict_stalls[c] << "\n";
+            }
+        }
+    }
+#endif
+
+    string thr_path = make_path(_throughput_csv_name);
+    if(!thr_path.empty()) {
+        ostream *out = NULL;
+        ofstream thr_file;
+        if(thr_path == "-") out = &cout;
+        else {
+            thr_file.open(thr_path.c_str());
+            if(thr_file.good()) out = &thr_file;
+        }
+        if(out) {
+            double sim_time = static_cast<double>(_time - _reset_time);
+            *out << "class,sent_packets,accepted_packets,sent_flits,accepted_flits,avg_throughput_flits_per_cycle\n";
+            for(int c = 0; c < _classes; ++c) {
+                int sentp = 0, accp = 0, sentf = 0, accf = 0;
+                _ComputeStats(_sent_packets[c], &sentp);
+                _ComputeStats(_accepted_packets[c], &accp);
+                _ComputeStats(_sent_flits[c], &sentf);
+                _ComputeStats(_accepted_flits[c], &accf);
+                double thr = (sim_time > 0) ? (static_cast<double>(accf) / sim_time) : 0.0;
+                *out << c << "," << sentp << "," << accp << "," << sentf << "," << accf << "," << thr << "\n";
+            }
+        }
     }
 }
 

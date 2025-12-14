@@ -84,6 +84,10 @@ protected:
   std::string _dvfs_log_name;
   std::string _output_dir;
   std::string _run_name;
+  std::string _base_output_dir;
+  std::string _latency_csv_name;
+  std::string _stall_csv_name;
+  std::string _throughput_csv_name;
 
   // ============ Traffic ============ 
 
@@ -333,6 +337,7 @@ protected:
 
   int _GetNextPacketSize(int cl) const;
   double _GetAveragePacketSize(int cl) const;
+  void _WriteCSVs();
 
 public:
 

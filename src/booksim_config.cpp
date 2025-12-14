@@ -170,6 +170,8 @@ BookSimConfig::BookSimConfig( )
   _int_map["netrace_ignore_deps"] = 0;
   _int_map["netrace_scale"] = 1; // divide trace cycles by this factor
   _int_map["netrace_class"] = 0;
+  _int_map["netrace_use_addr_size"] = 0; // if set, use packet->addr as size (bytes)
+  _int_map["netrace_class_from_node_types"] = 1; // if set, node_types carries class id
   AddStrField("class_assigner", "static");
   AddStrField("priority_policy", "static_class");
   AddStrField("dvfs_policy", "uniform");

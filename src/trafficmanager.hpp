@@ -104,6 +104,8 @@ protected:
   bool _use_netrace;
   int _netrace_class;
   int _channel_width;
+  bool _netrace_use_addr_size;
+  bool _netrace_class_from_node_types;
   std::unique_ptr<NetraceAdapter> _netrace_adapter;
   std::unordered_map<int, nt_packet_t *> _netrace_inflight;
 

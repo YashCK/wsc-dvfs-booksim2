@@ -234,6 +234,9 @@ TrafficManager::TrafficManager( const Configuration &config, const vector<Networ
     _netrace_class = config.GetInt("netrace_class");
     if(_netrace_class < 0) _netrace_class = 0;
     if(_netrace_class >= _classes) _netrace_class = _classes - 1;
+    _netrace_use_addr_size = (config.GetInt("netrace_use_addr_size") > 0);
+    _netrace_class_from_node_types =
+        (config.GetInt("netrace_class_from_node_types") > 0);
     if(_use_netrace) {
         string netrace_file = config.GetStr("netrace_file");
         if(netrace_file.empty()) {
@@ -1024,13 +1027,17 @@ void TrafficManager::_Inject(){
 
     if(_use_netrace && _netrace_adapter) {
         _netrace_adapter->AdvanceTo(_time);
-        int cl = _netrace_class;
         for (int input = 0; input < _nodes; ++input) {
-            if (_partial_packets[input][cl].empty() &&
+            // Use default class unless overridden per-packet
+            int default_cl = _netrace_class;
+            if (_partial_packets[input][default_cl].empty() &&
                 _netrace_adapter->Ready(input, _time)) {
                 NetracePacket pkt = _netrace_adapter->PopReady(input, _time);
                 if (pkt.packet) {
                     int bytes = nt_get_packet_size(pkt.packet);
+                    if (_netrace_use_addr_size && pkt.packet->addr > 0) {
+                        bytes = pkt.packet->addr;
+                    }
                     int size_flits = 1;
                     if (bytes > 0) {
                         size_flits =
@@ -1055,6 +1062,13 @@ void TrafficManager::_Inject(){
                     if (inject_cycle > std::numeric_limits<int>::max()) {
                         inject_cycle = std::numeric_limits<int>::max();
                     }
+                    int cl = default_cl;
+                    if (_netrace_class_from_node_types) {
+                        cl = pkt.packet->node_types;
+                        if (cl < 0 || cl >= _classes) {
+                            cl = default_cl;
+                        }
+                    }
                     _GeneratePacket(input, 1, cl,
                                     static_cast<int>(inject_cycle),
                                     static_cast<int>(pkt.packet->dst),
@@ -1063,8 +1077,8 @@ void TrafficManager::_Inject(){
                 }
             }
             if ((_sim_state == draining) && _netrace_adapter->Done() &&
-                _partial_packets[input][cl].empty()) {
-                _qdrained[input][cl] = true;
+                _partial_packets[input][default_cl].empty()) {
+                _qdrained[input][default_cl] = true;
             }
         }
         return;

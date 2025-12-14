@@ -95,6 +95,7 @@ protected:
   std::string _throughput_csv_name;
   std::string _summary_csv_name;
   std::string _energy_csv_name;
+  std::string _epoch_csv_name;
   double _power_cap;
   int _dvfs_log_interval;
   long long _dvfs_log_last;
@@ -173,6 +174,7 @@ protected:
   int _dvfs_epoch;
   long long _last_dvfs_epoch;
   std::ostream * _energy_out;
+  std::ostream * _epoch_out;
   double _ClampDomainScale(int domain, double scale) const;
   PowerTelemetry _power_telemetry;
 
@@ -200,12 +202,14 @@ protected:
   vector<double> _overall_avg_plat;  
   vector<double> _overall_max_plat;  
   vector<PercentileStats *> _plat_pcnt_stats;
+  vector<PercentileStats *> _epoch_plat_pcnt_stats;
 
   vector<Stats *> _nlat_stats;     
   vector<double> _overall_min_nlat;  
   vector<double> _overall_avg_nlat;  
   vector<double> _overall_max_nlat;  
   vector<PercentileStats *> _nlat_pcnt_stats;
+  vector<PercentileStats *> _epoch_nlat_pcnt_stats;
 
   vector<Stats *> _flat_stats;     
   vector<double> _overall_min_flat;  
@@ -213,6 +217,7 @@ protected:
   vector<double> _overall_max_flat;  
   vector<PercentileStats *> _flat_pcnt_stats;
   vector<PercentileStats *> _qdel_pcnt_stats;
+  vector<PercentileStats *> _epoch_qdel_pcnt_stats;
 
   vector<Stats *> _frag_stats;
   vector<double> _overall_min_frag;
@@ -225,6 +230,9 @@ protected:
 
   vector<Stats *> _hop_stats;
   vector<double> _overall_hop_stats;
+
+  vector<long long> _epoch_sent_packets;
+  vector<long long> _epoch_accepted_packets;
 
   vector<vector<int> > _sent_packets;
   vector<double> _overall_min_sent_packets;
@@ -254,6 +262,11 @@ protected:
   vector<double> _overall_buffer_full_stalls;
   vector<double> _overall_buffer_reserved_stalls;
   vector<double> _overall_crossbar_conflict_stalls;
+  vector<double> _epoch_buffer_busy_stalls;
+  vector<double> _epoch_buffer_conflict_stalls;
+  vector<double> _epoch_buffer_full_stalls;
+  vector<double> _epoch_buffer_reserved_stalls;
+  vector<double> _epoch_crossbar_conflict_stalls;
 #endif
 
   vector<int> _slowest_packet;

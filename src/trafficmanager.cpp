@@ -274,7 +274,9 @@ TrafficManager::TrafficManager( const Configuration &config, const vector<Networ
     _stall_csv_name = config.GetStr("stall_csv");
     _throughput_csv_name = config.GetStr("throughput_csv");
     _summary_csv_name = config.GetStr("summary_csv");
+    _epoch_csv_name = config.GetStr("epoch_csv");
     _energy_out = NULL;
+    _epoch_out = NULL;
     _power_cap = config.GetFloat("power_cap");
     _dvfs_log_interval = config.GetInt("dvfs_log_interval");
     if(_dvfs_log_interval <= 0) _dvfs_log_interval = _dvfs_epoch;
@@ -317,6 +319,37 @@ TrafficManager::TrafficManager( const Configuration &config, const vector<Networ
                     *_energy_out << ",class" << c << "_energy";
                 }
                 *_energy_out << endl;
+            }
+        }
+    }
+    std::string epoch_cfg = config.GetStr("epoch_csv");
+    if(!epoch_cfg.empty()) {
+        if(epoch_cfg == "-") {
+            _epoch_out = &cout;
+        } else {
+            std::string epoch_path = (epoch_cfg[0] == '/') ? epoch_cfg : (base_dir + "/" + epoch_cfg);
+            std::ofstream *epoch_stream = new std::ofstream(epoch_path.c_str());
+            if(!epoch_stream->is_open()) {
+                cerr << "Could not open epoch CSV " << epoch_path << " for writing" << endl;
+                delete epoch_stream;
+            } else {
+                _epoch_out = epoch_stream;
+                *_epoch_out << "epoch,time,total_power,headroom,avg_power";
+                for(int c = 0; c < _classes; ++c) {
+                    *_epoch_out << ",class" << c << "_p50"
+                                << ",class" << c << "_p95"
+                                << ",class" << c << "_p99"
+                                << ",class" << c << "_qdel_p99"
+                                << ",class" << c << "_throughput";
+#ifdef TRACK_STALLS
+                    *_epoch_out << ",class" << c << "_stall_busy_rate"
+                                << ",class" << c << "_stall_full_rate"
+                                << ",class" << c << "_stall_conflict_rate"
+                                << ",class" << c << "_stall_reserved_rate"
+                                << ",class" << c << "_stall_xbar_rate";
+#endif
+                }
+                *_epoch_out << endl;
             }
         }
     }
@@ -638,12 +671,14 @@ TrafficManager::TrafficManager( const Configuration &config, const vector<Networ
     _overall_avg_plat.resize(_classes, 0.0);
     _overall_max_plat.resize(_classes, 0.0);
     _plat_pcnt_stats.resize(_classes, static_cast<PercentileStats *>(NULL));
+    _epoch_plat_pcnt_stats.resize(_classes, static_cast<PercentileStats *>(NULL));
 
     _nlat_stats.resize(_classes);
     _overall_min_nlat.resize(_classes, 0.0);
     _overall_avg_nlat.resize(_classes, 0.0);
     _overall_max_nlat.resize(_classes, 0.0);
     _nlat_pcnt_stats.resize(_classes, static_cast<PercentileStats *>(NULL));
+    _epoch_nlat_pcnt_stats.resize(_classes, static_cast<PercentileStats *>(NULL));
 
     _flat_stats.resize(_classes);
     _overall_min_flat.resize(_classes, 0.0);
@@ -651,6 +686,7 @@ TrafficManager::TrafficManager( const Configuration &config, const vector<Networ
     _overall_max_flat.resize(_classes, 0.0);
     _flat_pcnt_stats.resize(_classes, static_cast<PercentileStats *>(NULL));
     _qdel_pcnt_stats.resize(_classes, static_cast<PercentileStats *>(NULL));
+    _epoch_qdel_pcnt_stats.resize(_classes, static_cast<PercentileStats *>(NULL));
 
     _frag_stats.resize(_classes);
     _overall_min_frag.resize(_classes, 0.0);
@@ -670,6 +706,8 @@ TrafficManager::TrafficManager( const Configuration &config, const vector<Networ
     _overall_min_sent_packets.resize(_classes, 0.0);
     _overall_avg_sent_packets.resize(_classes, 0.0);
     _overall_max_sent_packets.resize(_classes, 0.0);
+    _epoch_sent_packets.resize(_classes, 0);
+    _epoch_accepted_packets.resize(_classes, 0);
     _accepted_packets.resize(_classes);
     _overall_min_accepted_packets.resize(_classes, 0.0);
     _overall_avg_accepted_packets.resize(_classes, 0.0);
@@ -695,6 +733,11 @@ TrafficManager::TrafficManager( const Configuration &config, const vector<Networ
     _overall_buffer_full_stalls.resize(_classes, 0);
     _overall_buffer_reserved_stalls.resize(_classes, 0);
     _overall_crossbar_conflict_stalls.resize(_classes, 0);
+    _epoch_buffer_busy_stalls.resize(_classes, 0.0);
+    _epoch_buffer_conflict_stalls.resize(_classes, 0.0);
+    _epoch_buffer_full_stalls.resize(_classes, 0.0);
+    _epoch_buffer_reserved_stalls.resize(_classes, 0.0);
+    _epoch_crossbar_conflict_stalls.resize(_classes, 0.0);
 #endif
 
     for ( int c = 0; c < _classes; ++c ) {
@@ -704,12 +747,14 @@ TrafficManager::TrafficManager( const Configuration &config, const vector<Networ
         _plat_stats[c] = new Stats( this, tmp_name.str( ), 1.0, 1000 );
         _stats[tmp_name.str()] = _plat_stats[c];
         _plat_pcnt_stats[c] = new PercentileStats();
+        _epoch_plat_pcnt_stats[c] = new PercentileStats();
         tmp_name.str("");
   
         tmp_name << "nlat_stat_" << c;
         _nlat_stats[c] = new Stats( this, tmp_name.str( ), 1.0, 1000 );
         _stats[tmp_name.str()] = _nlat_stats[c];
         _nlat_pcnt_stats[c] = new PercentileStats();
+        _epoch_nlat_pcnt_stats[c] = new PercentileStats();
         tmp_name.str("");
   
         tmp_name << "flat_stat_" << c;
@@ -720,6 +765,7 @@ TrafficManager::TrafficManager( const Configuration &config, const vector<Networ
 
         tmp_name << "qdel_stat_" << c;
         _qdel_pcnt_stats[c] = new PercentileStats();
+        _epoch_qdel_pcnt_stats[c] = new PercentileStats();
         tmp_name.str("");
 
         tmp_name << "frag_stat_" << c;
@@ -804,6 +850,9 @@ TrafficManager::~TrafficManager( )
         delete _nlat_pcnt_stats[c];
         delete _flat_pcnt_stats[c];
         delete _qdel_pcnt_stats[c];
+        delete _epoch_plat_pcnt_stats[c];
+        delete _epoch_nlat_pcnt_stats[c];
+        delete _epoch_qdel_pcnt_stats[c];
         delete _hop_stats[c];
 
         delete _traffic_pattern[c];
@@ -826,6 +875,9 @@ TrafficManager::~TrafficManager( )
     }
     if(_energy_out && (_energy_out != &cout)) {
         delete static_cast<std::ofstream*>(_energy_out);
+    }
+    if(_epoch_out && (_epoch_out != &cout)) {
+        delete static_cast<std::ofstream*>(_epoch_out);
     }
 
 #ifdef TRACK_FLOWS
@@ -943,10 +995,13 @@ void TrafficManager::_RetireFlit( Flit *f, int dest )
         _nlat_stats[f->cl]->AddSample( f->atime - head->itime);
         _plat_pcnt_stats[f->cl]->AddSample( f->atime - head->ctime);
         _nlat_pcnt_stats[f->cl]->AddSample( f->atime - head->itime);
+        _epoch_plat_pcnt_stats[f->cl]->AddSample(f->atime - head->ctime);
+        _epoch_nlat_pcnt_stats[f->cl]->AddSample(f->atime - head->itime);
         _frag_stats[f->cl]->AddSample( (f->atime - head->atime) - (f->id - head->id) );
         int qdel = head->itime - head->ctime;
         if(qdel >= 0) {
             _qdel_pcnt_stats[f->cl]->AddSample(qdel);
+            _epoch_qdel_pcnt_stats[f->cl]->AddSample(qdel);
         }
    
             if(_pair_stats){
@@ -1290,6 +1345,7 @@ void TrafficManager::_Step( )
                     ++_accepted_flits[f->cl][n];
                     if(f->tail) {
                         ++_accepted_packets[f->cl][n];
+                        ++_epoch_accepted_packets[f->cl];
                     }
                 }
             }
@@ -1532,6 +1588,7 @@ void TrafficManager::_Step( )
                     ++_sent_flits[c][n];
                     if(f->head) {
                         ++_sent_packets[c][n];
+                        ++_epoch_sent_packets[c];
                     }
                 }
 	
@@ -1692,6 +1749,41 @@ void TrafficManager::_MaybeRunDVFS() {
     _dvfs_power_avg_count++;
 
     bool do_log = (_time - _dvfs_log_last) >= _dvfs_log_interval;
+    double headroom = _power_cap > 0 ? (_power_cap - _power_telemetry.total_power) : 0.0;
+    double avg_power = (_dvfs_power_avg_count > 0) ? (_dvfs_power_avg_sum / static_cast<double>(_dvfs_power_avg_count)) : _power_telemetry.total_power;
+    if(do_log && _epoch_out) {
+        *_epoch_out << (_dvfs_epoch ? (_time / _dvfs_epoch) : 0) << "," << _time << ","
+                    << _power_telemetry.total_power << "," << headroom << "," << avg_power;
+        for(int c = 0; c < _classes; ++c) {
+            double p50 = _epoch_nlat_pcnt_stats[c]->Percentile(0.50);
+            double p95 = _epoch_nlat_pcnt_stats[c]->Percentile(0.95);
+            double p99 = _epoch_nlat_pcnt_stats[c]->Percentile(0.99);
+            double q99 = _epoch_qdel_pcnt_stats[c]->Percentile(0.99);
+            double throughput = (_dvfs_epoch > 0) ? (static_cast<double>(_epoch_accepted_packets[c]) / static_cast<double>(_dvfs_epoch)) : 0.0;
+            *_epoch_out << "," << p50 << "," << p95 << "," << p99 << "," << q99 << "," << throughput;
+#ifdef TRACK_STALLS
+            double denom = (_dvfs_epoch > 0) ? (static_cast<double>(_dvfs_epoch) * static_cast<double>(_subnets*_routers)) : 1.0;
+            *_epoch_out << "," << (_epoch_buffer_busy_stalls[c] / denom)
+                        << "," << (_epoch_buffer_full_stalls[c] / denom)
+                        << "," << (_epoch_buffer_conflict_stalls[c] / denom)
+                        << "," << (_epoch_buffer_reserved_stalls[c] / denom)
+                        << "," << (_epoch_crossbar_conflict_stalls[c] / denom);
+#endif
+            _epoch_nlat_pcnt_stats[c]->Clear();
+            _epoch_plat_pcnt_stats[c]->Clear();
+            _epoch_qdel_pcnt_stats[c]->Clear();
+            _epoch_sent_packets[c] = 0;
+            _epoch_accepted_packets[c] = 0;
+#ifdef TRACK_STALLS
+            _epoch_buffer_busy_stalls[c] = 0.0;
+            _epoch_buffer_conflict_stalls[c] = 0.0;
+            _epoch_buffer_full_stalls[c] = 0.0;
+            _epoch_buffer_reserved_stalls[c] = 0.0;
+            _epoch_crossbar_conflict_stalls[c] = 0.0;
+#endif
+        }
+        *_epoch_out << endl;
+    }
     if(do_log && _energy_out) {
         // domain aggregates
         std::map<int, double> domain_dyn;
@@ -1819,11 +1911,16 @@ void TrafficManager::_ClearStats( )
         _nlat_pcnt_stats[c]->Clear();
         _flat_pcnt_stats[c]->Clear();
         _qdel_pcnt_stats[c]->Clear();
+        _epoch_plat_pcnt_stats[c]->Clear();
+        _epoch_nlat_pcnt_stats[c]->Clear();
+        _epoch_qdel_pcnt_stats[c]->Clear();
 
         _sent_packets[c].assign(_nodes, 0);
         _accepted_packets[c].assign(_nodes, 0);
         _sent_flits[c].assign(_nodes, 0);
         _accepted_flits[c].assign(_nodes, 0);
+        _epoch_sent_packets[c] = 0;
+        _epoch_accepted_packets[c] = 0;
 
 #ifdef TRACK_STALLS
         _buffer_busy_stalls[c].assign(_subnets*_routers, 0);
@@ -1831,6 +1928,11 @@ void TrafficManager::_ClearStats( )
         _buffer_full_stalls[c].assign(_subnets*_routers, 0);
         _buffer_reserved_stalls[c].assign(_subnets*_routers, 0);
         _crossbar_conflict_stalls[c].assign(_subnets*_routers, 0);
+        _epoch_buffer_busy_stalls[c] = 0.0;
+        _epoch_buffer_conflict_stalls[c] = 0.0;
+        _epoch_buffer_full_stalls[c] = 0.0;
+        _epoch_buffer_reserved_stalls[c] = 0.0;
+        _epoch_crossbar_conflict_stalls[c] = 0.0;
 #endif
         if(_pair_stats){
             for ( int i = 0; i < _nodes; ++i ) {
@@ -2444,6 +2546,11 @@ void TrafficManager::UpdateStats() {
                 _buffer_full_stalls[c][subnet*_routers+router] += r->GetBufferFullStalls(c);
                 _buffer_reserved_stalls[c][subnet*_routers+router] += r->GetBufferReservedStalls(c);
                 _crossbar_conflict_stalls[c][subnet*_routers+router] += r->GetCrossbarConflictStalls(c);
+                _epoch_buffer_busy_stalls[c] += r->GetBufferBusyStalls(c);
+                _epoch_buffer_conflict_stalls[c] += r->GetBufferConflictStalls(c);
+                _epoch_buffer_full_stalls[c] += r->GetBufferFullStalls(c);
+                _epoch_buffer_reserved_stalls[c] += r->GetBufferReservedStalls(c);
+                _epoch_crossbar_conflict_stalls[c] += r->GetCrossbarConflictStalls(c);
                 r->ResetStallStats(c);
 #endif
             }

@@ -399,7 +399,7 @@ TrafficManager::TrafficManager( const Configuration &config, const vector<Networ
     }
     _router_domains = config.GetIntArray("router_domains");
     if(_router_domains.empty()) {
-        _router_domains.assign(_routers, 0);
+        _router_domains.assign(_routers, config.GetInt("router_domains"));
     }
     _router_domains.resize(_routers, _router_domains.back());
     for(int subnet = 0; subnet < _subnets; ++subnet) {

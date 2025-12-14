@@ -2425,10 +2425,11 @@ double IQRouter::_ComputeOrionPower(double freq_scale) {
   double freq = _orion_freq_hz * freq_scale;
   int cycles = _switchMonitor->NumCycles();
   if(cycles <= 0) return 0.0;
-  int total_events = 0;
-  const vector<int> & act = _switchMonitor->GetActivity();
-  for(size_t i = 0; i < act.size(); ++i) total_events += act[i];
-  double e_fin = static_cast<double>(total_events) / (static_cast<double>(_inputs) * static_cast<double>(cycles) + 1e-12);
+  // Estimate average flits per input per cycle using buffer writes (closer to actual ingress)
+  int total_writes = 0;
+  const vector<int> & writes = _bufferMonitor->GetWrites();
+  for(size_t i = 0; i < writes.size(); ++i) total_writes += writes[i];
+  double e_fin = static_cast<double>(total_writes) / (static_cast<double>(_inputs) * static_cast<double>(cycles) + 1e-12);
   double e_avg = SIM_router_stat_energy(&_orion_info, &_orion_power, -1, NULL, 0, e_fin, 0, freq);
   double power = e_avg * freq;
   return power;

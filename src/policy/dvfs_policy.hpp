@@ -26,6 +26,7 @@ public:
   explicit UniformDVFSPolicy(double target = 1.0) : _target(target) {}
   void Update(const PowerTelemetry & /*pwr*/, NetworkControl &net,
               int /*epoch*/) override;
+  std::string GetType() const override { return "uniform"; }
 
 private:
   double _target;

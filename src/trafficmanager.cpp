@@ -40,6 +40,7 @@
 #include "vc.hpp"
 #include "packet_reply_info.hpp"
 #include "policy/policy_factory.hpp"
+#include "power/buffer_monitor.hpp"
 #include <cmath>
 #include "routers/iq_router.hpp"
 #include <sys/stat.h>
@@ -273,6 +274,7 @@ TrafficManager::TrafficManager( const Configuration &config, const vector<Networ
     _stall_csv_name = config.GetStr("stall_csv");
     _throughput_csv_name = config.GetStr("throughput_csv");
     _summary_csv_name = config.GetStr("summary_csv");
+    _energy_out = NULL;
     _power_cap = config.GetFloat("power_cap");
     _dvfs_log_interval = config.GetInt("dvfs_log_interval");
     if(_dvfs_log_interval <= 0) _dvfs_log_interval = _dvfs_epoch;
@@ -298,6 +300,26 @@ TrafficManager::TrafficManager( const Configuration &config, const vector<Networ
     }
     ensure_dir(base_dir);
     _base_output_dir = base_dir;
+    std::string energy_cfg = config.GetStr("energy_csv");
+    if(!energy_cfg.empty()) {
+        if(energy_cfg == "-") {
+            _energy_out = &cout;
+        } else {
+            std::string energy_path = (energy_cfg[0] == '/') ? energy_cfg : (base_dir + "/" + energy_cfg);
+            std::ofstream *energy_stream = new std::ofstream(energy_path.c_str());
+            if(!energy_stream->is_open()) {
+                cerr << "Could not open energy CSV " << energy_path << " for writing" << endl;
+                delete energy_stream;
+            } else {
+                _energy_out = energy_stream;
+                *_energy_out << "epoch,time,domain,freq,dyn_power,leak_power,total_power,dyn_energy,leak_energy,total_energy";
+                for(int c = 0; c < _classes; ++c) {
+                    *_energy_out << ",class" << c << "_energy";
+                }
+                *_energy_out << endl;
+            }
+        }
+    }
     string dvfs_path;
     if(!_dvfs_log_name.empty()) {
         if(_dvfs_log_name == "-") {
@@ -752,6 +774,9 @@ TrafficManager::~TrafficManager( )
     if(_stats_out && (_stats_out != &cout)) delete _stats_out;
     if(_dvfs_log_out && (_dvfs_log_out != &cout)) {
         delete static_cast<std::ofstream*>(_dvfs_log_out);
+    }
+    if(_energy_out && (_energy_out != &cout)) {
+        delete static_cast<std::ofstream*>(_energy_out);
     }
 
 #ifdef TRACK_FLOWS
@@ -1522,16 +1547,31 @@ void TrafficManager::_MaybeRunDVFS() {
 
     _power_telemetry.total_power = 0.0;
     _power_telemetry.router_power.assign(_routers, 0.0);
+    vector<double> router_dyn(_routers, 0.0);
+    vector<double> router_leak(_routers, 0.0);
+    vector<vector<long long> > router_class_activity(_routers, vector<long long>(_classes, 0));
     if(_use_orion) {
         for(int r = 0; r < _routers; ++r) {
             IQRouter *iqr = dynamic_cast<IQRouter *>(_router[0][r]);
             double freq_scale = _router_freq_scale[r];
             double p = 0.0;
             if(iqr) {
+                const BufferMonitor *bm = iqr->GetBufferMonitor();
+                if(bm) {
+                    const vector<int> &writes = bm->GetWrites();
+                    for(int c = 0; c < _classes; ++c) {
+                        long long sum = 0;
+                        for(int in = 0; in < bm->NumInputs(); ++in) {
+                            sum += writes[c + bm->NumClasses() * in];
+                        }
+                        router_class_activity[r][c] = sum;
+                    }
+                }
                 p = iqr->GetOrionPower(freq_scale);
                 iqr->ResetPowerMonitors();
             }
             _power_telemetry.router_power[r] = p;
+            router_dyn[r] = p;
             _power_telemetry.total_power += p;
         }
     } else {
@@ -1557,6 +1597,8 @@ void TrafficManager::_MaybeRunDVFS() {
             double leak = _power_leak_base * v;
             double p = dyn + leak;
             _power_telemetry.router_power[r] = p;
+            router_dyn[r] = dyn;
+            router_leak[r] = leak;
             _power_telemetry.total_power += p;
         }
     }
@@ -1585,6 +1627,50 @@ void TrafficManager::_MaybeRunDVFS() {
     _dvfs_power_avg_count++;
 
     bool do_log = (_time - _dvfs_log_last) >= _dvfs_log_interval;
+    if(do_log && _energy_out) {
+        // domain aggregates
+        std::map<int, double> domain_dyn;
+        std::map<int, double> domain_leak;
+        std::map<int, double> domain_total;
+        std::map<int, double> domain_freq;
+        std::map<int, vector<long long> > domain_activity;
+        for(int r = 0; r < _routers; ++r) {
+            int d = _router_domains[r];
+            domain_dyn[d] += router_dyn[r];
+            domain_leak[d] += router_leak[r];
+            domain_total[d] += _power_telemetry.router_power[r];
+            if(domain_freq.find(d) == domain_freq.end()) {
+                domain_freq[d] = _router_freq_scale[r];
+            }
+            vector<long long> &v = domain_activity[d];
+            if(v.empty()) v.resize(_classes, 0);
+            for(int c = 0; c < _classes; ++c) {
+                v[c] += router_class_activity[r][c];
+            }
+        }
+        for(std::map<int,double>::const_iterator it = domain_total.begin(); it != domain_total.end(); ++it) {
+            int d = it->first;
+            double dyn_p = domain_dyn[d];
+            double leak_p = domain_leak[d];
+            double tot_p = domain_total[d];
+            double dyn_e = dyn_p * static_cast<double>(_dvfs_epoch);
+            double leak_e = leak_p * static_cast<double>(_dvfs_epoch);
+            double tot_e = tot_p * static_cast<double>(_dvfs_epoch);
+            const vector<long long> &act = domain_activity[d];
+            long long act_sum = 0;
+            for(size_t c = 0; c < act.size(); ++c) act_sum += act[c];
+            *_energy_out << (_dvfs_epoch ? (_time / _dvfs_epoch) : 0) << "," << _time << "," << d << "," << domain_freq[d]
+                         << "," << dyn_p << "," << leak_p << "," << tot_p
+                         << "," << dyn_e << "," << leak_e << "," << tot_e;
+            for(int c = 0; c < _classes; ++c) {
+                double frac = (act_sum > 0) ? (static_cast<double>(act[c]) / static_cast<double>(act_sum)) : 0.0;
+                double ce = dyn_e * frac; // attribute dynamic to class share
+                *_energy_out << "," << ce;
+            }
+            *_energy_out << endl;
+        }
+    }
+
     if(do_log && _dvfs_log_out) {
         std::map<int, double> domain_power;
         std::map<int, double> domain_freq;

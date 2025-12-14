@@ -219,6 +219,7 @@ BookSimConfig::BookSimConfig( )
   AddStrField("stall_csv", "");
   AddStrField("throughput_csv", "");
   AddStrField("summary_csv", "");
+  AddStrField("energy_csv", "");
   _float_map["power_cap"] = 0.0;
   _int_map["dvfs_log_interval"] = 0;
 

@@ -89,6 +89,7 @@ protected:
   std::string _stall_csv_name;
   std::string _throughput_csv_name;
   std::string _summary_csv_name;
+  std::string _energy_csv_name;
   double _power_cap;
   int _dvfs_log_interval;
   long long _dvfs_log_last;
@@ -166,6 +167,7 @@ protected:
   bool _hold_switch_for_packet;
   int _dvfs_epoch;
   long long _last_dvfs_epoch;
+  std::ostream * _energy_out;
   PowerTelemetry _power_telemetry;
 
   // ============ physical sub-networks ==========

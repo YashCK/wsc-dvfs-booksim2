@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <iostream>
 
 QueuePIDPolicy::QueuePIDPolicy(double target, double kp, double ki, double kd,
                                double min_scale, double max_scale,
@@ -38,7 +39,8 @@ void QueuePIDPolicy::Update(const PowerTelemetry &pwr, NetworkControl &net, int 
   if(_per_router) {
     for(size_t r = 0; r < n_units; ++r) {
       double meas = (r < pwr.router_occupancy.size()) ? pwr.router_occupancy[r] : 0.0;
-      double err = _target - meas;
+      // FIXED: Invert error sign so higher occupancy → speed up
+      double err = meas - _target;  // Positive when congested
       _int_err[r] += err;
       double deriv = err - _prev_err[r];
       double delta = _kp * err + _ki * _int_err[r] + _kd * deriv;
@@ -56,11 +58,21 @@ void QueuePIDPolicy::Update(const PowerTelemetry &pwr, NetworkControl &net, int 
       for(double v : pwr.router_occupancy) sum += v;
       meas = sum / static_cast<double>(pwr.router_occupancy.size());
     }
-    double err = _target - meas;
+    // FIXED: Invert error sign so higher occupancy → speed up
+    double err = meas - _target;  // Positive when congested
     _int_err[0] += err;
     double deriv = err - _prev_err[0];
     double delta = _kp * err + _ki * _int_err[0] + _kd * deriv;
     double new_scale = clamp(_prev_scale[0] + delta);
+    
+    std::cout << "QUEUE_PID: epoch=" << epoch 
+              << " target=" << _target 
+              << " meas=" << meas 
+              << " err=" << err 
+              << " delta=" << delta 
+              << " old_scale=" << _prev_scale[0]
+              << " new_scale=" << new_scale << std::endl;
+    
     if(headroom_ok(new_scale, _prev_scale[0])) {
       net.SetDomainSpeed(0, new_scale);
       _prev_scale[0] = new_scale;

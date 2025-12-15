@@ -127,24 +127,6 @@ void PerfTargetDVFSPolicy::Update(const PowerTelemetry &pwr, NetworkControl &net
     _EnsureSize(1);
     double meas = (lower == "latency") ? measure_latency(pwr) : measure_throughput(pwr);
     double new_scale = decide(meas, _prev_scale[0]);
-    
-    // Debug logging
-    if(lower == "latency") {
-      double raw_err = meas - _target;
-      double clamped_err = std::max(0.0, raw_err);
-      double delta = _kp * (clamped_err / (_target > 1e-9 ? _target : 1.0));
-      std::cout << "PERF_TARGET: epoch=" << epoch 
-                << " metric=" << _metric
-                << " meas=" << meas 
-                << " target=" << _target
-                << " raw_err=" << raw_err
-                << " clamped_err=" << clamped_err
-                << " delta=" << delta
-                << " old_scale=" << _prev_scale[0]
-                << " new_scale=" << new_scale
-                << std::endl;
-    }
-    
     if(headroom_ok(new_scale, _prev_scale[0])) {
       net.SetDomainSpeed(0, new_scale);
       _prev_scale[0] = new_scale;

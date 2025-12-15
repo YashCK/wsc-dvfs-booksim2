@@ -1671,6 +1671,13 @@ void TrafficManager::_MaybeRunDVFS() {
     _power_telemetry.router_occupancy.assign(_routers, 0.0);
     _power_telemetry.router_injection_rate.assign(_routers, 0.0);
     _power_telemetry.router_stall_rate.assign(_routers, 0.0);
+    _power_telemetry.class_latency_p50.assign(_classes, 0.0);
+    _power_telemetry.class_latency_p95.assign(_classes, 0.0);
+    _power_telemetry.class_latency_p99.assign(_classes, 0.0);
+    _power_telemetry.class_injection_rate.assign(_classes, 0.0);
+    _power_telemetry.class_throughput.assign(_classes, 0.0);
+    _power_telemetry.power_cap = _power_cap;
+    _power_telemetry.headroom = (_power_cap > 0.0) ? (_power_cap - _power_telemetry.total_power) : 0.0;
     vector<double> router_dyn(_routers, 0.0);
     vector<double> router_leak(_routers, 0.0);
     vector<vector<long long> > router_class_activity(_routers, vector<long long>(_classes, 0));
@@ -1755,6 +1762,7 @@ void TrafficManager::_MaybeRunDVFS() {
                 (rr->NumInputs() > 0) ? (occ_sum / static_cast<double>(rr->NumInputs())) : 0.0;
         }
     }
+    _power_telemetry.headroom = (_power_cap > 0.0) ? (_power_cap - _power_telemetry.total_power) : 0.0;
 
     struct TMControl : public NetworkControl {
         explicit TMControl(TrafficManager* tm_in) : tm(tm_in) {}
@@ -1781,6 +1789,15 @@ void TrafficManager::_MaybeRunDVFS() {
 
     _dvfs_power_avg_sum += _power_telemetry.total_power;
     _dvfs_power_avg_count++;
+
+    // Per-class latency percentiles for policy use
+    for(int c = 0; c < _classes; ++c) {
+        _power_telemetry.class_latency_p50[c] = _epoch_nlat_pcnt_stats[c]->Percentile(0.50);
+        _power_telemetry.class_latency_p95[c] = _epoch_nlat_pcnt_stats[c]->Percentile(0.95);
+        _power_telemetry.class_latency_p99[c] = _epoch_nlat_pcnt_stats[c]->Percentile(0.99);
+        _power_telemetry.class_injection_rate[c] = (_dvfs_epoch > 0) ? (static_cast<double>(_epoch_sent_packets[c]) / static_cast<double>(_dvfs_epoch)) : 0.0;
+        _power_telemetry.class_throughput[c] = (_dvfs_epoch > 0) ? (static_cast<double>(_epoch_accepted_packets[c]) / static_cast<double>(_dvfs_epoch)) : 0.0;
+    }
 
     bool do_log = (_time - _dvfs_log_last) >= _dvfs_log_interval;
     double headroom = _power_cap > 0 ? (_power_cap - _power_telemetry.total_power) : 0.0;

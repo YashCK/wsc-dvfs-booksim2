@@ -66,11 +66,14 @@ public:
   HWReactiveDVFSPolicy(double high_thresh, double low_thresh,
                        double high_scale, double low_scale,
                        int hysteresis_epochs, bool per_router,
-                       std::string signal)
+                       std::string signal, int control_class,
+                       double control_slo_cycles, double headroom_margin)
       : _high_thresh(high_thresh), _low_thresh(low_thresh),
         _high_scale(high_scale), _low_scale(low_scale),
         _hysteresis(hysteresis_epochs), _per_router(per_router),
-        _signal(std::move(signal)), _last_change_epoch(-1) {}
+        _signal(std::move(signal)), _control_class(control_class),
+        _control_slo(control_slo_cycles), _headroom_margin(headroom_margin),
+        _last_change_epoch(-1) {}
   void Update(const PowerTelemetry &pwr, NetworkControl &net,
               int epoch) override;
   std::string GetType() const override { return "hw_reactive"; }
@@ -83,6 +86,9 @@ private:
   int _hysteresis;
   bool _per_router;
   std::string _signal;
+  int _control_class;
+  double _control_slo;
+  double _headroom_margin;
   int _last_change_epoch;
 };
 

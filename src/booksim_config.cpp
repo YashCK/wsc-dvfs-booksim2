@@ -225,6 +225,11 @@ BookSimConfig::BookSimConfig( )
   _float_map["power_leak_base"] = 0.1; // arbitrary base leakage per router
   AddStrField("dvfs_log", ""); // optional DVFS/power log file
 
+  // Control/SLO knobs for DVFS policies
+  _float_map["control_slo_cycles"] = 0.0; // 0 disables SLO-based boosting
+  _int_map["control_class_id"] = 0;
+  _float_map["hw_reactive_headroom_margin"] = 0.0; // W
+
   // Output directories/names
   AddStrField("output_dir", "sims");
   AddStrField("run_name", "run");

@@ -15,6 +15,8 @@ struct PolicyTelemetry {
 
 struct PowerTelemetry {
   double total_power = 0.0;
+  double power_cap = 0.0;
+  double headroom = 0.0;
   // Optional per-router power estimates
   std::vector<double> router_power;
   // Optional per-router average occupancy (fraction of buffer depth)
@@ -23,7 +25,13 @@ struct PowerTelemetry {
   std::vector<double> router_injection_rate;
   // Optional per-router stall rate per epoch
   std::vector<double> router_stall_rate;
-  // Optional per-class P99 per epoch (already populated elsewhere)
+  // Optional per-class latency percentiles per epoch
+  std::vector<double> class_latency_p50;
+  std::vector<double> class_latency_p95;
+  std::vector<double> class_latency_p99;
+  // Optional per-class injection/throughput per epoch
+  std::vector<double> class_injection_rate;
+  std::vector<double> class_throughput;
 };
 
 #endif

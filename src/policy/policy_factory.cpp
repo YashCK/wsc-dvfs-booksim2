@@ -51,8 +51,12 @@ std::unique_ptr<DVFSPolicy> MakeDVFSPolicy(const Configuration &config) {
     int hyst = config.GetInt("hw_reactive_hysteresis_epochs");
     bool per_router = config.GetInt("hw_reactive_per_router") > 0;
     string signal = config.GetStr("hw_reactive_signal");
+    int control_class = config.GetInt("control_class_id");
+    double control_slo = config.GetFloat("control_slo_cycles");
+    double headroom_margin = config.GetFloat("hw_reactive_headroom_margin");
     return std::unique_ptr<DVFSPolicy>(
-        new HWReactiveDVFSPolicy(hi_t, lo_t, hi_s, lo_s, hyst, per_router, signal));
+        new HWReactiveDVFSPolicy(hi_t, lo_t, hi_s, lo_s, hyst, per_router, signal,
+                                 control_class, control_slo, headroom_margin));
   }
   if (mode == "uniform" || mode.empty()) {
     return std::unique_ptr<DVFSPolicy>(new UniformDVFSPolicy(1.0));

@@ -39,8 +39,10 @@ void QueuePIDPolicy::Update(const PowerTelemetry &pwr, NetworkControl &net, int 
   if(_per_router) {
     for(size_t r = 0; r < n_units; ++r) {
       double meas = (r < pwr.router_occupancy.size()) ? pwr.router_occupancy[r] : 0.0;
-      // FIXED: Invert error sign so higher occupancy → speed up
-      double err = meas - _target;  // Positive when congested
+      // Error = target - meas (ORIGINAL sign)
+      // When meas > target (congested): error negative → with NEGATIVE Kp → positive delta → speed UP
+      // When meas < target (idle): error positive → with NEGATIVE Kp → negative delta → speed DOWN
+      double err = _target - meas;
       _int_err[r] += err;
       double deriv = err - _prev_err[r];
       double delta = _kp * err + _ki * _int_err[r] + _kd * deriv;
@@ -58,8 +60,9 @@ void QueuePIDPolicy::Update(const PowerTelemetry &pwr, NetworkControl &net, int 
       for(double v : pwr.router_occupancy) sum += v;
       meas = sum / static_cast<double>(pwr.router_occupancy.size());
     }
-    // FIXED: Invert error sign so higher occupancy → speed up
-    double err = meas - _target;  // Positive when congested
+    // Error = target - meas (ORIGINAL sign)
+    // Use NEGATIVE Kp so: high occupancy → negative error → negative Kp → positive delta → speed UP
+    double err = _target - meas;
     _int_err[0] += err;
     double deriv = err - _prev_err[0];
     double delta = _kp * err + _ki * _int_err[0] + _kd * deriv;

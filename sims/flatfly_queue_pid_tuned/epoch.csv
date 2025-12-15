@@ -1,0 +1,3 @@
+epoch,time,total_power,headroom,avg_power,class0_p50,class0_p95,class0_p99,class0_qdel_p99,class0_throughput,class0_stall_busy_rate,class0_stall_full_rate,class0_stall_conflict_rate,class0_stall_reserved_rate,class0_stall_xbar_rate
+1,10000,0.768177,9.23182,0.768177,19,30,37,0,38.3138,0,0,0,0.0360875,4.72107
+2,20000,0.677047,9.32295,0.722612,16,16,16,5664,0.0003,0,0,0,0,0

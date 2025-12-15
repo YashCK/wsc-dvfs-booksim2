@@ -61,4 +61,29 @@ private:
   std::function<void(const PowerTelemetry &, NetworkControl &, int)> _fn;
 };
 
+class HWReactiveDVFSPolicy : public DVFSPolicy {
+public:
+  HWReactiveDVFSPolicy(double high_thresh, double low_thresh,
+                       double high_scale, double low_scale,
+                       int hysteresis_epochs, bool per_router,
+                       std::string signal)
+      : _high_thresh(high_thresh), _low_thresh(low_thresh),
+        _high_scale(high_scale), _low_scale(low_scale),
+        _hysteresis(hysteresis_epochs), _per_router(per_router),
+        _signal(std::move(signal)), _last_change_epoch(-1) {}
+  void Update(const PowerTelemetry &pwr, NetworkControl &net,
+              int epoch) override;
+  std::string GetType() const override { return "hw_reactive"; }
+
+private:
+  double _high_thresh;
+  double _low_thresh;
+  double _high_scale;
+  double _low_scale;
+  int _hysteresis;
+  bool _per_router;
+  std::string _signal;
+  int _last_change_epoch;
+};
+
 #endif

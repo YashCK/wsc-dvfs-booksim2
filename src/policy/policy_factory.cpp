@@ -43,6 +43,17 @@ std::unique_ptr<DVFSPolicy> MakeDVFSPolicy(const Configuration &config) {
   if (mode == "budget") {
     return std::unique_ptr<DVFSPolicy>(new BudgetDVFSPolicy(cap, min_scale, max_scale));
   }
+  if (mode == "hw_reactive") {
+    double hi_t = config.GetFloat("hw_reactive_high_thresh");
+    double lo_t = config.GetFloat("hw_reactive_low_thresh");
+    double hi_s = config.GetFloat("hw_reactive_high_scale");
+    double lo_s = config.GetFloat("hw_reactive_low_scale");
+    int hyst = config.GetInt("hw_reactive_hysteresis_epochs");
+    bool per_router = config.GetInt("hw_reactive_per_router") > 0;
+    string signal = config.GetStr("hw_reactive_signal");
+    return std::unique_ptr<DVFSPolicy>(
+        new HWReactiveDVFSPolicy(hi_t, lo_t, hi_s, lo_s, hyst, per_router, signal));
+  }
   if (mode == "uniform" || mode.empty()) {
     return std::unique_ptr<DVFSPolicy>(new UniformDVFSPolicy(1.0));
   }

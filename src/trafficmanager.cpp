@@ -1668,6 +1668,9 @@ void TrafficManager::_MaybeRunDVFS() {
 
     _power_telemetry.total_power = 0.0;
     _power_telemetry.router_power.assign(_routers, 0.0);
+    _power_telemetry.router_occupancy.assign(_routers, 0.0);
+    _power_telemetry.router_injection_rate.assign(_routers, 0.0);
+    _power_telemetry.router_stall_rate.assign(_routers, 0.0);
     vector<double> router_dyn(_routers, 0.0);
     vector<double> router_leak(_routers, 0.0);
     vector<vector<long long> > router_class_activity(_routers, vector<long long>(_classes, 0));
@@ -1677,6 +1680,14 @@ void TrafficManager::_MaybeRunDVFS() {
             double freq_scale = _router_freq_scale[r];
             double p = 0.0;
             if(iqr) {
+                // occupancy fraction
+                double occ_sum = 0.0;
+                for(int in = 0; in < iqr->NumInputs(); ++in) {
+                    occ_sum += static_cast<double>(iqr->GetBufferOccupancy(in)) /
+                               static_cast<double>(iqr->GetBufferSize(in));
+                }
+                _power_telemetry.router_occupancy[r] =
+                    (iqr->NumInputs() > 0) ? (occ_sum / static_cast<double>(iqr->NumInputs())) : 0.0;
                 const BufferMonitor *bm = iqr->GetBufferMonitor();
                 if(bm) {
                     const vector<int> &writes = bm->GetWrites();
@@ -1686,8 +1697,18 @@ void TrafficManager::_MaybeRunDVFS() {
                             sum += writes[c + bm->NumClasses() * in];
                         }
                         router_class_activity[r][c] = sum;
+                        _power_telemetry.router_injection_rate[r] += sum;
                     }
                 }
+                // simple stall rate proxy from stalls per epoch if available
+                double stall_sum = 0.0;
+#ifdef TRACK_STALLS
+                for(int c = 0; c < _classes; ++c) {
+                    stall_sum += iqr->GetBufferFullStalls(c);
+                    stall_sum += iqr->GetBufferBusyStalls(c);
+                }
+#endif
+                _power_telemetry.router_stall_rate[r] = stall_sum / std::max(1.0, static_cast<double>(_dvfs_epoch));
                 p = iqr->GetOrionPower(freq_scale);
                 iqr->ResetPowerMonitors();
             }
@@ -1724,6 +1745,14 @@ void TrafficManager::_MaybeRunDVFS() {
             router_dyn[r] = dyn;
             router_leak[r] = leak;
             _power_telemetry.total_power += p;
+            Router *rr = _router[0][r];
+            double occ_sum = 0.0;
+            for(int in = 0; in < rr->NumInputs(); ++in) {
+                occ_sum += static_cast<double>(rr->GetBufferOccupancy(in)) /
+                           static_cast<double>(rr->GetBufferSize(in));
+            }
+            _power_telemetry.router_occupancy[r] =
+                (rr->NumInputs() > 0) ? (occ_sum / static_cast<double>(rr->NumInputs())) : 0.0;
         }
     }
 

@@ -80,6 +80,7 @@ public:
   {
     return _occupancy >= _size;
   }
+  inline int GetSize( ) const { return _size; }
 
   inline VC::eVCState GetState( int vc ) const
   {

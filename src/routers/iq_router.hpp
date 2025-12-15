@@ -36,6 +36,7 @@
 
 #include "router.hpp"
 #include "routefunc.hpp"
+#include "buffer.hpp"
 #include "ORION3_0/SIM_router.h"
 #include "ORION3_0/SIM_router_power.h"
 #include "ORION3_0/SIM_misc.h"
@@ -181,6 +182,7 @@ public:
 
   virtual int GetUsedCredit(int o) const;
   virtual int GetBufferOccupancy(int i) const;
+  virtual int GetBufferSize(int i) const { assert(i >=0 && i < _inputs); return _buf[i]->GetSize(); }
 
 #ifdef TRACK_BUFFERS
   virtual int GetUsedCreditForClass(int output, int cl) const;

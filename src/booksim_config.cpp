@@ -214,6 +214,13 @@ BookSimConfig::BookSimConfig( )
   AddStrField("dvfs_max_scale", "");
   AddStrField("dvfs_domain_freqs", ""); // semicolon-separated per-domain lists, e.g., "1.0 0.8;1.0 0.6"
   AddStrField("dvfs_domain_voltages", ""); // semicolon-separated per-domain voltage lists
+  _float_map["hw_reactive_high_thresh"] = 0.6;
+  _float_map["hw_reactive_low_thresh"] = 0.2;
+  _float_map["hw_reactive_high_scale"] = 1.0;
+  _float_map["hw_reactive_low_scale"] = 0.5;
+  _int_map["hw_reactive_hysteresis_epochs"] = 1;
+  AddStrField("hw_reactive_signal", "queue"); // queue | inj | stall | latency
+  _int_map["hw_reactive_per_router"] = 0; // 0 = per-domain
   _float_map["power_dyn_base"] = 1.0; // arbitrary base dynamic power per router
   _float_map["power_leak_base"] = 0.1; // arbitrary base leakage per router
   AddStrField("dvfs_log", ""); // optional DVFS/power log file

@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <iostream>
 #include <string>
 
 namespace {
@@ -55,10 +56,15 @@ void HWReactiveDVFSPolicy::Update(const PowerTelemetry &pwr, NetworkControl &net
     } else if(lower_str == "stall") {
       sig = norm_signal(pwr.router_stall_rate);
     }
+    std::cout << "HW_REACTIVE: epoch=" << epoch << " signal=" << sig 
+              << " thresholds=[" << _low_thresh << "," << _high_thresh << "]" << std::endl;
     double target = pick_scale(sig);
     if(target > 0.0) {
+      std::cout << "HW_REACTIVE: Changing domain 0 frequency to " << target << std::endl;
       net.SetDomainSpeed(0, target); // domains map handled by TrafficManager
       _last_change_epoch = epoch;
+    } else {
+      std::cout << "HW_REACTIVE: No change needed (sig in dead zone)" << std::endl;
     }
   }
 }

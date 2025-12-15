@@ -228,6 +228,14 @@ BookSimConfig::BookSimConfig( )
   _float_map["queue_pid_kd"] = 0.0;
   _int_map["queue_pid_per_router"] = 0;
   _float_map["queue_pid_headroom_margin"] = 0.0;
+  // Performance-targeted DVFS (track latency/throughput)
+  AddStrField("perf_target_metric", "latency"); // latency|throughput
+  _float_map["perf_target_value"] = 0.0; // desired latency (cycles) or throughput (packets/cycle)
+  _int_map["perf_target_value"] = 0; // allow integer assignment
+  _int_map["perf_target_class"] = 0;
+  _float_map["perf_target_kp"] = 0.05;
+  _int_map["perf_target_per_router"] = 0;
+  _float_map["perf_target_headroom_margin"] = 0.0;
   _float_map["power_dyn_base"] = 1.0; // arbitrary base dynamic power per router
   _float_map["power_leak_base"] = 0.1; // arbitrary base leakage per router
   AddStrField("dvfs_log", ""); // optional DVFS/power log file

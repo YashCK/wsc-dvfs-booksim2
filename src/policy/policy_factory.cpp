@@ -5,6 +5,7 @@
 using std::string;
 
 #include "policy/dvfs_queue_pid.hpp"
+#include "policy/dvfs_perf_target.hpp"
 
 std::unique_ptr<ClassAssigner> MakeClassAssigner(const Configuration &config,
                                                  int classes) {
@@ -69,6 +70,16 @@ std::unique_ptr<DVFSPolicy> MakeDVFSPolicy(const Configuration &config) {
     double headroom_margin = config.GetFloat("queue_pid_headroom_margin");
     return std::unique_ptr<DVFSPolicy>(
         new QueuePIDPolicy(target, kp, ki, kd, min_scale, max_scale, per_router, headroom_margin));
+  }
+  if (mode == "perf_target") {
+    string metric = config.GetStr("perf_target_metric");
+    double target = config.GetFloat("perf_target_value");
+    int tclass = config.GetInt("perf_target_class");
+    double kp = config.GetFloat("perf_target_kp");
+    bool per_router = config.GetInt("perf_target_per_router") > 0;
+    double headroom_margin = config.GetFloat("perf_target_headroom_margin");
+    return std::unique_ptr<DVFSPolicy>(
+        new PerfTargetDVFSPolicy(metric, target, tclass, kp, min_scale, max_scale, per_router, headroom_margin));
   }
   if (mode == "uniform" || mode.empty()) {
     return std::unique_ptr<DVFSPolicy>(new UniformDVFSPolicy(1.0));

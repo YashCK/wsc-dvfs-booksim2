@@ -4,6 +4,8 @@
 
 using std::string;
 
+#include "policy/dvfs_queue_pid.hpp"
+
 std::unique_ptr<ClassAssigner> MakeClassAssigner(const Configuration &config,
                                                  int classes) {
   string mode = config.GetStr("class_assigner");
@@ -57,6 +59,16 @@ std::unique_ptr<DVFSPolicy> MakeDVFSPolicy(const Configuration &config) {
     return std::unique_ptr<DVFSPolicy>(
         new HWReactiveDVFSPolicy(hi_t, lo_t, hi_s, lo_s, hyst, per_router, signal,
                                  control_class, control_slo, headroom_margin));
+  }
+  if (mode == "queue_pid") {
+    double target = config.GetFloat("queue_pid_target");
+    double kp = config.GetFloat("queue_pid_kp");
+    double ki = config.GetFloat("queue_pid_ki");
+    double kd = config.GetFloat("queue_pid_kd");
+    bool per_router = config.GetInt("queue_pid_per_router") > 0;
+    double headroom_margin = config.GetFloat("queue_pid_headroom_margin");
+    return std::unique_ptr<DVFSPolicy>(
+        new QueuePIDPolicy(target, kp, ki, kd, min_scale, max_scale, per_router, headroom_margin));
   }
   if (mode == "uniform" || mode.empty()) {
     return std::unique_ptr<DVFSPolicy>(new UniformDVFSPolicy(1.0));

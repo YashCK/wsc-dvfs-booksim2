@@ -221,6 +221,13 @@ BookSimConfig::BookSimConfig( )
   _int_map["hw_reactive_hysteresis_epochs"] = 1;
   AddStrField("hw_reactive_signal", "queue"); // queue | inj | stall | latency
   _int_map["hw_reactive_per_router"] = 0; // 0 = per-domain
+  // Queue-based PID DVFS
+  _float_map["queue_pid_target"] = 0.01; // desired occupancy fraction
+  _float_map["queue_pid_kp"] = 0.05;
+  _float_map["queue_pid_ki"] = 0.0;
+  _float_map["queue_pid_kd"] = 0.0;
+  _int_map["queue_pid_per_router"] = 0;
+  _float_map["queue_pid_headroom_margin"] = 0.0;
   _float_map["power_dyn_base"] = 1.0; // arbitrary base dynamic power per router
   _float_map["power_leak_base"] = 0.1; // arbitrary base leakage per router
   AddStrField("dvfs_log", ""); // optional DVFS/power log file

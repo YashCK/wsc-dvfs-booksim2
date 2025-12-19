@@ -7,16 +7,18 @@
 
 QueuePIDPolicy::QueuePIDPolicy(double target, double kp, double ki, double kd,
                                double min_scale, double max_scale,
-                               bool per_router, double headroom_margin)
+                               bool per_router, double headroom_margin,
+                               int control_class)
     : _target(target), _kp(kp), _ki(ki), _kd(kd),
       _min_scale(min_scale), _max_scale(max_scale),
-      _per_router(per_router), _headroom_margin(headroom_margin) {}
+      _per_router(per_router), _headroom_margin(headroom_margin),
+      _control_class(control_class) {}
 
 void QueuePIDPolicy::_EnsureSize(size_t n) {
   if(_int_err.size() < n) {
     _int_err.assign(n, 0.0);
     _prev_err.assign(n, 0.0);
-    _prev_scale.assign(n, 1.0);
+    _prev_scale.assign(n, _max_scale);
   }
 }
 
@@ -29,134 +31,114 @@ void QueuePIDPolicy::Update(const PowerTelemetry &pwr, NetworkControl &net, int 
   _EnsureSize(n_routers);
 
   auto clamp = [&](double v)->double {
-    if(v > _max_scale) return _max_scale;
-    if(v < _min_scale) return _min_scale;
-    return v;
+    return std::max(_min_scale, std::min(_max_scale, v));
   };
 
-  // DIFFERENTIATED CONTROL: Use PID per-router with power budget awareness
-  // Key insight: High-load routers need speed, low-load routers can be throttled
+  // === CLASS-AWARE LATENCY CHECK ===
+  double class_latency = 0.0;
+  if(!pwr.class_latency_p99.empty()) {
+    if(_control_class >= 0 && _control_class < static_cast<int>(pwr.class_latency_p99.size())) {
+      class_latency = pwr.class_latency_p99[_control_class];
+    } else if(!pwr.class_latency_p99.empty()) {
+      class_latency = pwr.class_latency_p99[0];
+    }
+  }
+  
+  // Priority class needs attention if latency > SLO (30 cycles)
+  bool priority_stressed = (class_latency > 30.0);
   
   if(_per_router && n_routers > 1) {
-    // === PER-ROUTER DIFFERENTIATED PID ===
-    // Strategy: Each router runs its own PID, but we bias allocations
-    // based on relative load to prioritize busy routers
+    // === PER-ROUTER CLASS-AWARE PID ===
     
-    // 1. Compute load metrics
-    double max_occ = 0.0;
-    double sum_occ = 0.0;
+    double max_occ = 0.0, sum_occ = 0.0;
     for(size_t r = 0; r < n_routers; ++r) {
       max_occ = std::max(max_occ, pwr.router_occupancy[r]);
       sum_occ += pwr.router_occupancy[r];
     }
     double avg_occ = sum_occ / n_routers;
     
-    // 2. Compute power budget - how much headroom do we have?
-    double power_budget_factor = 1.0;
+    // Power budget
+    double power_budget = 1.0;
     if(pwr.headroom < 0.0 && pwr.power_cap > 0.0) {
-      // Over budget - need to throttle overall
-      double over_ratio = -pwr.headroom / pwr.power_cap;
-      power_budget_factor = 1.0 - std::min(over_ratio * 1.5, 0.5);
+      double over = -pwr.headroom / pwr.power_cap;
+      power_budget = 1.0 - std::min(over * 1.2, 0.4);
     }
     
-    // 3. Run PID for each router with load-aware bias
     for(size_t r = 0; r < n_routers; ++r) {
-      double meas = pwr.router_occupancy[r];
+      double occ = pwr.router_occupancy[r];
+      double rel_load = (max_occ > 1e-9) ? occ / max_occ : 0.0;
       
-      // Compute relative load (0 = idle, 1 = busiest)
-      double rel_load = (max_occ > 1e-9) ? meas / max_occ : 0.0;
-      
-      // MODIFIED PID: Target varies by load
-      // High-load routers: try to reduce congestion (run fast)
-      // Low-load routers: can tolerate more occupancy (run slow)
-      double adaptive_target = _target;
-      if(rel_load > 0.5) {
-        // Busy router: lower target to trigger speedup
-        adaptive_target = _target * 0.5;
-      } else {
-        // Idle router: raise target to allow slowdown
-        adaptive_target = _target * 2.0;
+      // Adaptive target
+      double target = _target;
+      if(priority_stressed) {
+        target = _target * 0.3;  // Aggressive speedup
+      } else if(rel_load > 0.7) {
+        target = _target * 0.5;
+      } else if(rel_load < 0.3) {
+        target = _target * 1.5;
       }
       
-      // PID error: positive when occupancy > target (congested)
-      // We want: congested → speed up, idle → slow down
-      double err = meas - adaptive_target;
-      _int_err[r] = _int_err[r] * 0.9 + err; // decay integral term
-      double deriv = err - _prev_err[r];
+      // PID with anti-windup
+      double err = occ - target;
+      bool sat = (_prev_scale[r] <= _min_scale && err < 0) ||
+                 (_prev_scale[r] >= _max_scale && err > 0);
+      if(!sat) _int_err[r] = _int_err[r] * 0.85 + err;
+      _int_err[r] = std::max(-3.0, std::min(3.0, _int_err[r]));
+      double deriv = 0.5 * (err - _prev_err[r]);
+      _prev_err[r] = err;
       
-      // PID output: positive error → positive delta → speed up
-      // Use POSITIVE gains (Kp > 0) since we want congestion to increase freq
-      double delta = std::abs(_kp) * err + std::abs(_ki) * _int_err[r] + std::abs(_kd) * deriv;
+      // Tuned gains
+      double delta = 0.15 * err + 0.02 * _int_err[r] + 0.03 * deriv;
+      double target_scale = _prev_scale[r] + delta;
       
-      // Apply power budget factor - scale down if over cap
-      // But high-load routers get priority (less throttling)
-      double router_budget = power_budget_factor;
-      if(rel_load > 0.5) {
-        // High-load router: protect from excessive throttling
-        router_budget = std::max(power_budget_factor, 0.8);
-      } else {
-        // Low-load router: can throttle more aggressively
-        router_budget = power_budget_factor * (0.5 + 0.5 * rel_load);
+      // Class-aware budget
+      double budget = power_budget;
+      if(priority_stressed && rel_load > 0.5) {
+        budget = std::max(power_budget, 0.9);
+      } else if(rel_load < 0.3) {
+        budget = power_budget * 0.7;
       }
       
-      double new_scale = clamp(_prev_scale[r] + delta);
-      new_scale = clamp(new_scale * router_budget / std::max(0.5, _prev_scale[r] / _max_scale));
-      
-      // Simpler: just apply budget factor to computed scale
-      new_scale = clamp(_prev_scale[r] + delta);
-      double budget_adjusted = _min_scale + router_budget * (new_scale - _min_scale);
-      new_scale = clamp(budget_adjusted);
+      target_scale = _min_scale + budget * (clamp(target_scale) - _min_scale);
+      double new_scale = 0.7 * _prev_scale[r] + 0.3 * clamp(target_scale);
       
       net.SetRouterSpeed(static_cast<int>(r), new_scale);
       _prev_scale[r] = new_scale;
-      _prev_err[r] = err;
     }
     
-    std::cout << "QUEUE_PID_DIFF: epoch=" << epoch 
-              << " max_occ=" << max_occ 
-              << " avg_occ=" << avg_occ
-              << " budget=" << power_budget_factor
-              << " headroom=" << pwr.headroom << std::endl;
+    std::cout << "QUEUE_PID_CLASS: epoch=" << epoch 
+              << " class" << _control_class << "_lat=" << class_latency
+              << " stressed=" << priority_stressed
+              << " budget=" << power_budget << std::endl;
     
   } else {
-    // === GLOBAL PID CONTROL ===
-    // Fall back to simple PID on average occupancy
-    
+    // === GLOBAL CLASS-AWARE PID ===
     double meas = 0.0;
-    if(!pwr.router_occupancy.empty()) {
-      for(double v : pwr.router_occupancy) meas += v;
-      meas /= static_cast<double>(pwr.router_occupancy.size());
-    }
+    for(double v : pwr.router_occupancy) meas += v;
+    meas /= std::max(1.0, static_cast<double>(pwr.router_occupancy.size()));
     
-    // PID: we want to maintain occupancy near target
-    // If occupancy > target (congested): speed up
-    // If occupancy < target (idle): slow down for power
-    double err = meas - _target;
-    _int_err[0] = _int_err[0] * 0.9 + err;
+    double target = priority_stressed ? _target * 0.5 : _target;
+    double err = meas - target;
+    _int_err[0] = std::max(-5.0, std::min(5.0, _int_err[0] * 0.9 + err));
     double deriv = err - _prev_err[0];
     
-    // Positive gains: congestion → positive error → speed up
-    double delta = std::abs(_kp) * err + std::abs(_ki) * _int_err[0] + std::abs(_kd) * deriv;
-    double new_scale = clamp(_prev_scale[0] + delta);
+    double delta = 0.2 * err + 0.02 * _int_err[0] + 0.05 * deriv;
+    double target_scale = clamp(_prev_scale[0] + delta);
     
-    // Power cap enforcement
     if(pwr.headroom < 0.0 && pwr.power_cap > 0.0) {
-      double over_ratio = -pwr.headroom / pwr.power_cap;
-      new_scale = new_scale * (1.0 - std::min(over_ratio * 1.5, 0.4));
-      new_scale = clamp(new_scale);
+      double over = -pwr.headroom / pwr.power_cap;
+      double budget = 1.0 - std::min(over * 1.2, 0.4);
+      target_scale = _min_scale + budget * (target_scale - _min_scale);
     }
     
-    std::cout << "QUEUE_PID: epoch=" << epoch 
-              << " target=" << _target 
-              << " meas=" << meas 
-              << " err=" << err 
-              << " delta=" << delta 
-              << " new_scale=" << new_scale
-              << " headroom=" << pwr.headroom << std::endl;
-    
+    double new_scale = 0.7 * _prev_scale[0] + 0.3 * clamp(target_scale);
     net.SetDomainSpeed(0, new_scale);
     _prev_scale[0] = new_scale;
     _prev_err[0] = err;
+    
+    std::cout << "QUEUE_PID: epoch=" << epoch 
+              << " class_lat=" << class_latency
+              << " scale=" << new_scale << std::endl;
   }
 }
 

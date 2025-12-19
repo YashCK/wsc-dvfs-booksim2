@@ -1,2 +1,2 @@
 policy,power_cap,control_p99,batch_p99,total_power_avg
-perf_target,10,37,0,0.815316
+perf_target,0.5,56,0,0.760609

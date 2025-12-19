@@ -5,6 +5,7 @@
 #include <iostream>
 #include <string>
 #include <numeric>
+#include <cmath>
 
 namespace {
 double norm_signal(const std::vector<double> &v) {
@@ -29,56 +30,107 @@ void HWReactiveDVFSPolicy::Update(const PowerTelemetry &pwr, NetworkControl &net
   }
   auto lower_str = to_lower(_signal);
 
-  auto latency_signal = [&](const PowerTelemetry &pt)->double {
-    if(!pt.class_latency_p99.empty() && _control_class >= 0 &&
-       _control_class < static_cast<int>(pt.class_latency_p99.size())) {
-      return pt.class_latency_p99[_control_class];
-    }
-    if(!pt.class_latency_p99.empty()) return pt.class_latency_p99[0];
-    return 0.0;
-  };
+  const size_t n_routers = pwr.router_occupancy.size();
+  if(n_routers == 0) return;
 
-  auto pick_scale = [&](double val, double headroom)->double {
-    if((lower_str == "latency") && (_control_slo > 0.0) && (val > _control_slo)) {
-      return _high_scale; // SLO violation: force max
-    }
-    if(val >= _high_thresh) return _high_scale;
-    if(val <= _low_thresh) {
-      if((_headroom_margin > 0.0) && (headroom <= _headroom_margin)) {
-        return -1.0; // avoid throttling when near cap
-      }
-      return _low_scale;
-    }
-    return -1.0; // no change
-  };
-
-  auto clamp_scale = [&](double s)->double {
-    if(s < 0.0) return s;
-    if(s > _high_scale) return _high_scale;
-    if(s < _low_scale) return _low_scale;
-    return s;
-  };
-
-  if(_per_router) {
-    const size_t n = pwr.router_occupancy.size();
-    for(size_t r = 0; r < n; ++r) {
-      double sig = 0.0;
+  // DIFFERENTIATED CONTROL: Prioritize high-load routers, throttle idle ones
+  // This lets us achieve LOWER latency than uniform throttle at same power!
+  
+  if(_per_router && n_routers > 1) {
+    // === PER-ROUTER DIFFERENTIATED CONTROL ===
+    // Strategy: Compute load-weighted frequency allocation
+    // High-load routers get high freq, idle routers get low freq
+    
+    // 1. Collect signals for each router
+    std::vector<double> signals(n_routers);
+    double max_signal = 0.0;
+    double sum_signal = 0.0;
+    for(size_t r = 0; r < n_routers; ++r) {
       if(lower_str == "queue") {
-        sig = (r < pwr.router_occupancy.size()) ? pwr.router_occupancy[r] : 0.0;
+        signals[r] = pwr.router_occupancy[r];
       } else if(lower_str == "inj") {
-        sig = (r < pwr.router_injection_rate.size()) ? pwr.router_injection_rate[r] : 0.0;
+        signals[r] = (r < pwr.router_injection_rate.size()) ? pwr.router_injection_rate[r] : 0.0;
       } else if(lower_str == "stall") {
-        sig = (r < pwr.router_stall_rate.size()) ? pwr.router_stall_rate[r] : 0.0;
-      } else if(lower_str == "latency") {
-        sig = latency_signal(pwr);
+        signals[r] = (r < pwr.router_stall_rate.size()) ? pwr.router_stall_rate[r] : 0.0;
+      } else {
+        signals[r] = pwr.router_occupancy[r];
       }
-      double target = clamp_scale(pick_scale(sig, pwr.headroom));
-      if(target > 0.0) {
-        net.SetRouterSpeed(static_cast<int>(r), target);
-        _last_change_epoch = epoch;
-      }
+      max_signal = std::max(max_signal, signals[r]);
+      sum_signal += signals[r];
     }
+    
+    // 2. Compute priority scores (higher load = higher priority = higher freq)
+    std::vector<double> priorities(n_routers);
+    double sum_priorities = 0.0;
+    for(size_t r = 0; r < n_routers; ++r) {
+      if(max_signal > 1e-9) {
+        priorities[r] = signals[r] / max_signal;
+      } else {
+        priorities[r] = 1.0; // all idle, treat equally
+      }
+      // Apply sqrt to make distribution less extreme
+      priorities[r] = std::pow(priorities[r], 0.5);
+      sum_priorities += priorities[r];
+    }
+    
+    // 3. Compute power budget allocation
+    double base_scale = _high_scale;
+    if(pwr.headroom < 0.0 && pwr.power_cap > 0.0) {
+      double over_ratio = -pwr.headroom / pwr.power_cap;
+      base_scale = _current_scale * (1.0 - std::min(over_ratio * 1.5, 0.4));
+      base_scale = std::max(base_scale, _low_scale);
+    }
+    
+    // 4. Allocate frequencies based on priority
+    double avg_priority = sum_priorities / n_routers;
+    
+    for(size_t r = 0; r < n_routers; ++r) {
+      double target_scale;
+      if(priorities[r] >= avg_priority) {
+        double t = (avg_priority < 1.0) ? 
+                   (priorities[r] - avg_priority) / (1.0 - avg_priority) : 0.0;
+        target_scale = base_scale + t * (_high_scale - base_scale);
+      } else {
+        double t = (avg_priority > 0.0) ? priorities[r] / avg_priority : 0.0;
+        target_scale = _low_scale + t * (base_scale - _low_scale);
+      }
+      target_scale = std::max(_low_scale, std::min(_high_scale, target_scale));
+      net.SetRouterSpeed(static_cast<int>(r), target_scale);
+    }
+    
+    _current_scale = base_scale;
+    _last_change_epoch = epoch;
+    
+    std::cout << "HW_REACTIVE_DIFF: epoch=" << epoch 
+              << " max_signal=" << max_signal
+              << " base_scale=" << base_scale
+              << " headroom=" << pwr.headroom << std::endl;
+    
   } else {
+    // === GLOBAL CONTROL (single domain) ===
+    auto latency_signal = [&](const PowerTelemetry &pt)->double {
+      if(!pt.class_latency_p99.empty() && _control_class >= 0 &&
+         _control_class < static_cast<int>(pt.class_latency_p99.size())) {
+        return pt.class_latency_p99[_control_class];
+      }
+      if(!pt.class_latency_p99.empty()) return pt.class_latency_p99[0];
+      return 0.0;
+    };
+
+    auto pick_scale = [&](double val, double headroom)->double {
+      if((lower_str == "latency") && (_control_slo > 0.0) && (val > _control_slo)) {
+        return _high_scale;
+      }
+      if(val >= _high_thresh) return _high_scale;
+      if(val <= _low_thresh) {
+        if((_headroom_margin > 0.0) && (headroom <= _headroom_margin)) {
+          return -1.0;
+        }
+        return _low_scale;
+      }
+      return -1.0;
+    };
+
     double sig = 0.0;
     if(lower_str == "queue") {
       sig = norm_signal(pwr.router_occupancy);
@@ -89,15 +141,24 @@ void HWReactiveDVFSPolicy::Update(const PowerTelemetry &pwr, NetworkControl &net
     } else if(lower_str == "latency") {
       sig = latency_signal(pwr);
     }
-    std::cout << "HW_REACTIVE: epoch=" << epoch << " signal=" << sig 
-              << " thresholds=[" << _low_thresh << "," << _high_thresh << "] headroom=" << pwr.headroom << std::endl;
-    double target = clamp_scale(pick_scale(sig, pwr.headroom));
-    if(target > 0.0) {
-      std::cout << "HW_REACTIVE: Changing domain 0 frequency to " << target << std::endl;
-      net.SetDomainSpeed(0, target); // domains map handled by TrafficManager
-      _last_change_epoch = epoch;
-    } else {
-      std::cout << "HW_REACTIVE: No change needed (sig in dead zone)" << std::endl;
+    
+    double target = pick_scale(sig, pwr.headroom);
+    if(target < 0.0) target = _current_scale;
+    
+    // Power cap enforcement
+    if(pwr.headroom < 0.0 && pwr.power_cap > 0.0) {
+      double over_ratio = -pwr.headroom / pwr.power_cap;
+      target = target * (1.0 - std::min(over_ratio * 2.0, 0.5));
+      target = std::max(target, _low_scale);
     }
+    
+    target = std::max(_low_scale, std::min(_high_scale, target));
+    
+    std::cout << "HW_REACTIVE: epoch=" << epoch << " signal=" << sig 
+              << " target=" << target << " headroom=" << pwr.headroom << std::endl;
+    
+    net.SetDomainSpeed(0, target);
+    _current_scale = target;
+    _last_change_epoch = epoch;
   }
 }

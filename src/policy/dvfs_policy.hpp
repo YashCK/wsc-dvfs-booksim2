@@ -73,7 +73,7 @@ public:
         _hysteresis(hysteresis_epochs), _per_router(per_router),
         _signal(std::move(signal)), _control_class(control_class),
         _control_slo(control_slo_cycles), _headroom_margin(headroom_margin),
-        _last_change_epoch(-1) {}
+        _last_change_epoch(-1), _current_scale(1.0) {}
   void Update(const PowerTelemetry &pwr, NetworkControl &net,
               int epoch) override;
   std::string GetType() const override { return "hw_reactive"; }
@@ -90,6 +90,7 @@ private:
   double _control_slo;
   double _headroom_margin;
   int _last_change_epoch;
+  double _current_scale;  // Track current frequency scale
 };
 
 #endif

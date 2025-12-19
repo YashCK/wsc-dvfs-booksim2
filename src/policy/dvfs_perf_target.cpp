@@ -4,6 +4,7 @@
 #include <cctype>
 #include <numeric>
 #include <iostream>
+#include <cmath>
 
 PerfTargetDVFSPolicy::PerfTargetDVFSPolicy(std::string metric, double target_value,
                                            int target_class, double kp,
@@ -21,116 +22,141 @@ void PerfTargetDVFSPolicy::_EnsureSize(size_t n) {
 
 void PerfTargetDVFSPolicy::Update(const PowerTelemetry &pwr, NetworkControl &net, int epoch) {
   (void)epoch;
+  
+  const size_t n_routers = pwr.router_power.size();
+  if(n_routers == 0) return;
+  
+  _EnsureSize(n_routers);
+
   auto clamp = [&](double v)->double {
     if(v > _max_scale) return _max_scale;
     if(v < _min_scale) return _min_scale;
     return v;
   };
-  auto headroom_ok = [&](double new_scale, double old_scale)->bool {
-    if(_headroom_margin <= 0.0) return true;
-    if(new_scale <= old_scale) return true;
-    return pwr.headroom > _headroom_margin;
-  };
 
   auto lower = _metric;
-  std::transform(lower.begin(), lower.end(), lower.begin(), [](unsigned char c){ return std::tolower(c); });
+  std::transform(lower.begin(), lower.end(), lower.begin(), 
+                 [](unsigned char c){ return std::tolower(c); });
 
-  auto measure_latency = [&](const PowerTelemetry &pt)->double {
-    if(!pt.class_latency_p99.empty() && _class >= 0 &&
-       _class < static_cast<int>(pt.class_latency_p99.size())) {
-      return pt.class_latency_p99[_class];
+  auto measure_latency = [&]()->double {
+    if(!pwr.class_latency_p99.empty() && _class >= 0 &&
+       _class < static_cast<int>(pwr.class_latency_p99.size())) {
+      return pwr.class_latency_p99[_class];
     }
-    if(!pt.class_latency_p99.empty()) return pt.class_latency_p99[0];
-    return 0.0;
-  };
-  auto measure_throughput = [&](const PowerTelemetry &pt)->double {
-    if(!pt.class_throughput.empty() && _class >= 0 &&
-       _class < static_cast<int>(pt.class_throughput.size())) {
-      return pt.class_throughput[_class];
-    }
-    if(!pt.class_throughput.empty()) return pt.class_throughput[0];
+    if(!pwr.class_latency_p99.empty()) return pwr.class_latency_p99[0];
     return 0.0;
   };
 
-  auto decide = [&](double meas, double old_scale)->double {
-    if(lower == "latency") {
-      // For latency: if meas > target (too slow), we want to speed up (positive delta)
-      // So we need: err positive → delta positive → speed up
-      // This requires NEGATIVE Kp: delta = (-Kp) * (+err) = negative × positive = negative
-      // Wait, that's wrong. Let me think again:
-      // meas > target (latency too high) → err = meas - target > 0 → want delta > 0 (speed up)
-      // So: delta = Kp * err, with POSITIVE Kp
-      // BUT: speed up means INCREASE frequency scale
-      // Actually the issue is that positive Kp makes it slow down!
-      // When latency < target (fast), err < 0, delta < 0, scale decreases → slows down ✓
-      // When latency > target (slow), err > 0, delta > 0, scale increases → speeds up ✓
-      // So positive Kp SHOULD work... unless the initial latency is BELOW target!
-      //
-      // AH! The problem: target=70, initial latency ~19
-      // err = 19 - 70 = -51 (negative)
-      // delta = 0.03 × (-51) = -1.53 (negative, but normalized)
-      // delta = 0.03 × (-51/70) = -0.022 (negative)
-      // scale = 1.0 + (-0.022) = 0.978 → slows down
-      // This causes latency to increase, which is BACKWARDS!
-      //
-      // We want: if latency < target, do NOTHING or speed up slightly for power savings
-      // if latency > target, speed up to reduce latency
-      //
-      // The right interpretation: target is a MAXIMUM latency constraint
-      // Use NEGATIVE Kp so that we only speed up when needed:
-      // latency < target: err < 0, delta = (-Kp) × err = positive → slow down for power ✓
-      // latency > target: err > 0, delta = (-Kp) × err = negative → speed up ✓
-      // Wait no, that's also wrong!
-      //
-      // Let me be very explicit:
-      // - old_scale + delta = new_scale
-      // - If delta > 0, we increase frequency (speed up)
-      // - If delta < 0, we decrease frequency (slow down)
-      //
-      // When latency > target (performance is bad):
-      //   err = meas - target > 0
-      //   We want delta > 0 (speed up)
-      //   So: delta = Kp × err requires Kp > 0
-      //
-      // When latency < target (performance is good):
-      //   err = meas - target < 0
-      //   We want delta < 0 (slow down to save power)
-      //   So: delta = Kp × err requires Kp > 0
-      //
-      // So positive Kp is CORRECT! The bug is that the target is set too HIGH.
-      // Initial latency ~19, target 70 → system tries to slow down to reach 70!
-      //
-      // The fix: interpret target as a MAXIMUM (SLO), not a setpoint
-      // Only act if latency EXCEEDS target:
-      double err = std::max(0.0, meas - _target); // only positive when violating SLO
-      double delta = _kp * (err / (_target > 1e-9 ? _target : 1.0));
-      return clamp(old_scale + delta);
-    } else { // throughput
-      double err = _target - meas; // positive when too slow (want more throughput)
-      double delta = _kp * (err / (_target > 1e-9 ? _target : 1.0));
-      return clamp(old_scale + delta);
-    }
-  };
-
-  if(_per_router) {
-    size_t n = pwr.router_power.size();
-    _EnsureSize(n);
-    for(size_t r = 0; r < n; ++r) {
-      double meas = (lower == "latency") ? measure_latency(pwr) : measure_throughput(pwr);
-      double new_scale = decide(meas, _prev_scale[r]);
-      if(headroom_ok(new_scale, _prev_scale[r])) {
-        net.SetRouterSpeed(static_cast<int>(r), new_scale);
-        _prev_scale[r] = new_scale;
+  // DIFFERENTIATED CONTROL: Meet latency SLO while minimizing power
+  // Key insight: Only throttle routers that have headroom to spare
+  
+  if(_per_router && n_routers > 1) {
+    // === PER-ROUTER LATENCY-AWARE CONTROL ===
+    // Strategy: 
+    // 1. If latency is within SLO, throttle low-load routers to save power
+    // 2. If latency exceeds SLO, speed up high-load (critical path) routers
+    
+    double current_latency = measure_latency();
+    
+    // Collect router loads
+    double max_occ = 0.0;
+    for(size_t r = 0; r < n_routers; ++r) {
+      if(r < pwr.router_occupancy.size()) {
+        max_occ = std::max(max_occ, pwr.router_occupancy[r]);
       }
     }
-  } else {
-    _EnsureSize(1);
-    double meas = (lower == "latency") ? measure_latency(pwr) : measure_throughput(pwr);
-    double new_scale = decide(meas, _prev_scale[0]);
-    if(headroom_ok(new_scale, _prev_scale[0])) {
-      net.SetDomainSpeed(0, new_scale);
-      _prev_scale[0] = new_scale;
+    
+    // Compute power budget
+    double power_budget = 1.0;
+    if(pwr.headroom < 0.0 && pwr.power_cap > 0.0) {
+      double over_ratio = -pwr.headroom / pwr.power_cap;
+      power_budget = 1.0 - std::min(over_ratio * 1.5, 0.5);
     }
+    
+    // Determine control mode based on latency
+    bool latency_ok = (current_latency <= _target) || (current_latency < 1e-9);
+    
+    for(size_t r = 0; r < n_routers; ++r) {
+      double occ = (r < pwr.router_occupancy.size()) ? pwr.router_occupancy[r] : 0.0;
+      double rel_load = (max_occ > 1e-9) ? occ / max_occ : 0.0;
+      
+      double target_scale;
+      
+      if(!latency_ok) {
+        // LATENCY TOO HIGH - need to speed up
+        // Prioritize high-load routers (they're likely on critical path)
+        if(rel_load > 0.5) {
+          // High-load router: run at max speed
+          target_scale = _max_scale;
+        } else {
+          // Low-load router: can still throttle somewhat
+          target_scale = _min_scale + rel_load * (_max_scale - _min_scale);
+        }
+      } else {
+        // LATENCY OK - can throttle for power savings
+        // Throttle low-load routers more aggressively
+        double throttle_factor = power_budget;
+        if(rel_load < 0.3) {
+          // Very idle - can throttle a lot
+          throttle_factor *= 0.6;
+        } else if(rel_load < 0.6) {
+          // Moderate load - throttle moderately
+          throttle_factor *= 0.8;
+        }
+        // else: high load - minimal throttle (throttle_factor stays at power_budget)
+        
+        target_scale = _min_scale + throttle_factor * (_max_scale - _min_scale);
+      }
+      
+      target_scale = clamp(target_scale);
+      net.SetRouterSpeed(static_cast<int>(r), target_scale);
+      _prev_scale[r] = target_scale;
+    }
+    
+    std::cout << "PERF_TARGET_DIFF: epoch=" << epoch 
+              << " latency=" << current_latency 
+              << " target=" << _target
+              << " latency_ok=" << latency_ok
+              << " budget=" << power_budget
+              << " headroom=" << pwr.headroom << std::endl;
+    
+  } else {
+    // === GLOBAL LATENCY-AWARE CONTROL ===
+    // If latency exceeds SLO, speed up; otherwise throttle for power
+    
+    double current_latency = measure_latency();
+    double target_scale = _prev_scale[0];
+    
+    if(current_latency > _target && current_latency > 1e-9) {
+      // Latency exceeds SLO - need to speed up
+      double overshoot = (current_latency - _target) / _target;
+      double delta = _kp * overshoot;
+      target_scale = clamp(_prev_scale[0] + delta);
+    } else if(current_latency > 1e-9) {
+      // Latency within SLO - can try to throttle for power
+      double margin = (_target - current_latency) / _target;
+      // Only throttle if we have significant margin
+      if(margin > 0.2) {
+        double delta = -_kp * margin * 0.5; // gentle throttle
+        target_scale = clamp(_prev_scale[0] + delta);
+      }
+    }
+    
+    // Power cap enforcement
+    if(pwr.headroom < 0.0 && pwr.power_cap > 0.0) {
+      double over_ratio = -pwr.headroom / pwr.power_cap;
+      target_scale = target_scale * (1.0 - std::min(over_ratio * 1.5, 0.4));
+      target_scale = clamp(target_scale);
+    }
+    
+    std::cout << "PERF_TARGET: epoch=" << epoch 
+              << " latency=" << current_latency 
+              << " target=" << _target
+              << " new_scale=" << target_scale
+              << " headroom=" << pwr.headroom << std::endl;
+    
+    net.SetDomainSpeed(0, target_scale);
+    _prev_scale[0] = target_scale;
   }
 }
 

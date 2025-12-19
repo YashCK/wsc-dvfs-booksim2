@@ -21,24 +21,24 @@ public:
   virtual std::string GetType() const { return "dvfs_policy"; }
 };
 
-class UniformDVFSPolicy : public DVFSPolicy {
+class StaticDVFSPolicy : public DVFSPolicy {
 public:
-  explicit UniformDVFSPolicy(double target = 1.0) : _target(target) {}
+  explicit StaticDVFSPolicy(double target = 1.0) : _target(target) {}
   void Update(const PowerTelemetry & /*pwr*/, NetworkControl &net,
               int /*epoch*/) override;
-  std::string GetType() const override { return "uniform"; }
+  std::string GetType() const override { return "static"; }
 
 private:
   double _target;
 };
 
-class BudgetDVFSPolicy : public DVFSPolicy {
+class UniformDVFSPolicy : public DVFSPolicy {
 public:
-  BudgetDVFSPolicy(double power_cap, double min_scale = 0.5,
+  UniformDVFSPolicy(double power_cap, double min_scale = 0.5,
                    double max_scale = 1.0)
       : _cap(power_cap), _min_scale(min_scale), _max_scale(max_scale) {}
   void Update(const PowerTelemetry &pwr, NetworkControl &net, int) override;
-  std::string GetType() const override { return "budget"; }
+  std::string GetType() const override { return "uniform"; }
 
 private:
   double _cap;

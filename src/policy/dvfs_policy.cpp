@@ -1,11 +1,11 @@
 #include "policy/dvfs_policy.hpp"
 
-void UniformDVFSPolicy::Update(const PowerTelemetry &,
+void StaticDVFSPolicy::Update(const PowerTelemetry &,
                                NetworkControl &net, int) {
   net.SetDomainSpeed(0, _target);
 }
 
-void BudgetDVFSPolicy::Update(const PowerTelemetry &pwr, NetworkControl &net,
+void UniformDVFSPolicy::Update(const PowerTelemetry &pwr, NetworkControl &net,
                               int) {
   if (_cap <= 0.0) {
     net.SetDomainSpeed(0, _max_scale);

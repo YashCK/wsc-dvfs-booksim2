@@ -174,7 +174,7 @@ BookSimConfig::BookSimConfig( )
   _int_map["netrace_class_from_node_types"] = 1; // if set, node_types carries class id
   AddStrField("class_assigner", "static");
   AddStrField("priority_policy", "static_class");
-  AddStrField("dvfs_policy", "uniform");
+  AddStrField("dvfs_policy", "static");
 
   _int_map["perm_seed"] = 0; // seed value for random permuation trafficpattern generator
   AddStrField("perm_seed", ""); // workaround to allow special "time" value

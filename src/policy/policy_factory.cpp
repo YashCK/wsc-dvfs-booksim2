@@ -43,8 +43,8 @@ std::unique_ptr<DVFSPolicy> MakeDVFSPolicy(const Configuration &config) {
   if(max_scales.empty()) max_scales.push_back(config.GetFloat("dvfs_max_scale"));
   double min_scale = min_scales.front();
   double max_scale = max_scales.front();
-  if (mode == "budget") {
-    return std::unique_ptr<DVFSPolicy>(new BudgetDVFSPolicy(cap, min_scale, max_scale));
+  if (mode == "uniform") {
+    return std::unique_ptr<DVFSPolicy>(new UniformDVFSPolicy(cap, min_scale, max_scale));
   }
   if (mode == "hw_reactive") {
     double hi_t = config.GetFloat("hw_reactive_high_thresh");
@@ -81,11 +81,11 @@ std::unique_ptr<DVFSPolicy> MakeDVFSPolicy(const Configuration &config) {
     return std::unique_ptr<DVFSPolicy>(
         new PerfTargetDVFSPolicy(metric, target, tclass, kp, min_scale, max_scale, per_router, headroom_margin));
   }
-  if (mode == "uniform" || mode.empty()) {
-    return std::unique_ptr<DVFSPolicy>(new UniformDVFSPolicy(1.0));
+  if (mode == "static" || mode.empty()) {
+    return std::unique_ptr<DVFSPolicy>(new StaticDVFSPolicy(1.0));
   }
   if (mode == "custom") {
-    return std::unique_ptr<DVFSPolicy>(new UniformDVFSPolicy(1.0));
+    return std::unique_ptr<DVFSPolicy>(new StaticDVFSPolicy(1.0));
   }
-  return std::unique_ptr<DVFSPolicy>(new UniformDVFSPolicy(1.0));
+  return std::unique_ptr<DVFSPolicy>(new StaticDVFSPolicy(1.0));
 }

@@ -93,6 +93,7 @@ IQRouter::IQRouter( Configuration const & config, Module *parent,
 
   // Alloc VC's
   _buf.resize(_inputs);
+  _in_queue_flits.resize(_inputs);
   for ( int i = 0; i < _inputs; ++i ) {
     ostringstream module_name;
     module_name << "buf_" << i;
@@ -356,9 +357,9 @@ bool IQRouter::_ReceiveFlits( )
 		   << " from channel at input " << input
 		   << "." << endl;
       }
-      _in_queue_flits.insert(make_pair(input, f));
-      activity = true;
+      _in_queue_flits[input].push(f);
     }
+    activity = activity || !_in_queue_flits[input].empty();
   }
   return activity;
 }
@@ -384,15 +385,12 @@ bool IQRouter::_ReceiveCredits( )
 
 void IQRouter::_InputQueuing( )
 {
-  for(map<int, Flit *>::const_iterator iter = _in_queue_flits.begin();
-      iter != _in_queue_flits.end();
-      ++iter) {
+  for(int input = 0; input < _inputs; ++input) {
+    if(_in_queue_flits[input].empty()) continue;
 
-    int const input = iter->first;
-    assert((input >= 0) && (input < _inputs));
-
-    Flit * const f = iter->second;
+    Flit * const f = _in_queue_flits[input].front();
     assert(f);
+    _in_queue_flits[input].pop();
 
     int const vc = f->vc;
     assert((vc >= 0) && (vc < _vcs));
@@ -459,11 +457,10 @@ void IQRouter::_InputQueuing( )
 						       -1)));
       } else {
 	_sw_alloc_vcs.push_back(make_pair(-1, make_pair(make_pair(input, vc), 
-							-1)));
+				-1)));
       }
     }
   }
-  _in_queue_flits.clear();
 
   while(!_proc_credits.empty()) {
 

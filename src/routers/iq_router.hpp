@@ -33,6 +33,7 @@
 #include <queue>
 #include <set>
 #include <map>
+#include <vector>
 
 #include "router.hpp"
 #include "routefunc.hpp"
@@ -70,10 +71,10 @@ class IQRouter : public Router {
   bool _active;
 
   int _routing_delay;
-  int _vc_alloc_delay;
-  int _sw_alloc_delay;
-  
-  map<int, Flit *> _in_queue_flits;
+	  int _vc_alloc_delay;
+	  int _sw_alloc_delay;
+	  
+	  vector<queue<Flit *> > _in_queue_flits;
 
   deque<pair<int, pair<Credit *, int> > > _proc_credits;
 

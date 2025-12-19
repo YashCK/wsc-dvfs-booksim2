@@ -91,6 +91,7 @@ private:
   double _headroom_margin;
   int _last_change_epoch;
   double _current_scale;  // Track current frequency scale
+  std::vector<double> _router_scales;  // Per-router frequency scales
 };
 
 #endif

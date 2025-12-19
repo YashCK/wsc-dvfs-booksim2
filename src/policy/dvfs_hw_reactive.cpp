@@ -59,43 +59,57 @@ void HWReactiveDVFSPolicy::Update(const PowerTelemetry &pwr, NetworkControl &net
       sum_signal += signals[r];
     }
     
-    // 2. Compute priority scores (higher load = higher priority = higher freq)
-    std::vector<double> priorities(n_routers);
-    double sum_priorities = 0.0;
-    for(size_t r = 0; r < n_routers; ++r) {
-      if(max_signal > 1e-9) {
-        priorities[r] = signals[r] / max_signal;
-      } else {
-        priorities[r] = 1.0; // all idle, treat equally
-      }
-      // Apply sqrt to make distribution less extreme
-      priorities[r] = std::pow(priorities[r], 0.5);
-      sum_priorities += priorities[r];
+    // 2. IMPROVED: Use latency as secondary signal for prioritization
+    double current_latency = 0.0;
+    if(!pwr.class_latency_p99.empty()) {
+      current_latency = pwr.class_latency_p99[0];
     }
+    bool latency_critical = (current_latency > _control_slo) && (_control_slo > 0.0);
     
-    // 3. Compute power budget allocation
-    double base_scale = _high_scale;
+    // 3. Compute power budget with GRADUAL adjustment (anti-oscillation)
+    double target_base_scale = _high_scale;
     if(pwr.headroom < 0.0 && pwr.power_cap > 0.0) {
       double over_ratio = -pwr.headroom / pwr.power_cap;
-      base_scale = _current_scale * (1.0 - std::min(over_ratio * 1.5, 0.4));
-      base_scale = std::max(base_scale, _low_scale);
+      // Gentler response to avoid oscillation
+      target_base_scale = _high_scale * (1.0 - std::min(over_ratio * 1.2, 0.35));
     }
+    // Smooth transition (exponential moving average)
+    double base_scale = 0.7 * _current_scale + 0.3 * target_base_scale;
+    base_scale = std::max(_low_scale, std::min(_high_scale, base_scale));
     
-    // 4. Allocate frequencies based on priority
-    double avg_priority = sum_priorities / n_routers;
+    // 4. IMPROVED: Smart frequency allocation
+    double avg_signal = (n_routers > 0) ? (sum_signal / n_routers) : 0.0;
     
     for(size_t r = 0; r < n_routers; ++r) {
       double target_scale;
-      if(priorities[r] >= avg_priority) {
-        double t = (avg_priority < 1.0) ? 
-                   (priorities[r] - avg_priority) / (1.0 - avg_priority) : 0.0;
-        target_scale = base_scale + t * (_high_scale - base_scale);
+      double rel_load = (max_signal > 1e-9) ? signals[r] / max_signal : 1.0;
+      
+      if(latency_critical) {
+        // LATENCY CRITICAL: Boost high-load routers, minimal throttle on others
+        target_scale = base_scale + rel_load * (_high_scale - base_scale);
       } else {
-        double t = (avg_priority > 0.0) ? priorities[r] / avg_priority : 0.0;
-        target_scale = _low_scale + t * (base_scale - _low_scale);
+        // NORMAL: Proportional scaling based on load
+        // High load (>avg) -> higher freq, Low load (<avg) -> lower freq  
+        if(signals[r] > avg_signal * 1.2) {
+          // Hot router: keep fast
+          target_scale = base_scale + 0.5 * (_high_scale - base_scale);
+        } else if(signals[r] < avg_signal * 0.5) {
+          // Cold router: can throttle more
+          target_scale = _low_scale + 0.5 * (base_scale - _low_scale);
+        } else {
+          // Normal router: use base scale
+          target_scale = base_scale;
+        }
       }
+      
+      // Apply smoothing per-router to avoid abrupt changes
+      if(_router_scales.size() <= r) {
+        _router_scales.resize(n_routers, _high_scale);
+      }
+      target_scale = 0.6 * _router_scales[r] + 0.4 * target_scale;
       target_scale = std::max(_low_scale, std::min(_high_scale, target_scale));
       net.SetRouterSpeed(static_cast<int>(r), target_scale);
+      _router_scales[r] = target_scale;
     }
     
     _current_scale = base_scale;

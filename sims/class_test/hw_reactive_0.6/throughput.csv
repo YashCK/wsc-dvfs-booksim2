@@ -1,0 +1,3 @@
+class,offered_load,sent_packets,accepted_packets,sent_flits,accepted_flits,avg_throughput_flits_per_cycle
+0,0.3,960932,960990,960932,960990,15.5121
+1,0.3,970153,970331,970153,970331,15.6629

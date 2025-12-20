@@ -69,8 +69,10 @@ std::unique_ptr<DVFSPolicy> MakeDVFSPolicy(const Configuration &config) {
     bool per_router = config.GetInt("queue_pid_per_router") > 0;
     double headroom_margin = config.GetFloat("queue_pid_headroom_margin");
     int control_class = config.GetInt("control_class_id");
+    double control_slo = config.GetFloat("control_slo_cycles");
     return std::unique_ptr<DVFSPolicy>(
-        new QueuePIDPolicy(target, kp, ki, kd, min_scale, max_scale, per_router, headroom_margin, control_class));
+        new QueuePIDPolicy(target, kp, ki, kd, min_scale, max_scale, per_router, headroom_margin,
+                          control_class, control_slo));
   }
   if (mode == "perf_target") {
     string metric = config.GetStr("perf_target_metric");

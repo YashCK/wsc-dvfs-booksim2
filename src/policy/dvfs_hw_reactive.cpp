@@ -33,35 +33,18 @@ void HWReactiveDVFSPolicy::Update(const PowerTelemetry &pwr, NetworkControl &net
   const size_t n_routers = pwr.router_occupancy.size();
   if(n_routers == 0) return;
 
-  // === CLASS-AWARE LATENCY CHECK ===
-  auto get_class_latency = [&](int cls)->double {
-    if(!pwr.class_latency_p99.empty() && cls >= 0 &&
-       cls < static_cast<int>(pwr.class_latency_p99.size())) {
-      return pwr.class_latency_p99[cls];
-    }
-    if(!pwr.class_latency_p99.empty()) return pwr.class_latency_p99[0];
-    return 0.0;
-  };
-  
-  double priority_latency = get_class_latency(_control_class);
-  double other_latency = 0.0;
-  if(pwr.class_latency_p99.size() > 1) {
-    int other_class = (_control_class == 0) ? 1 : 0;
-    other_latency = get_class_latency(other_class);
-  }
-  
-  // Priority class stress (0 = fine, 1+ = critical)
-  double priority_stress = 0.0;
-  if(priority_latency > 1e-9 && _control_slo > 0.0) {
-    priority_stress = std::max(0.0, (priority_latency / _control_slo) - 1.0);
-  }
+  // DIFFERENTIATED CONTROL: Prioritize high-load routers, throttle idle ones
+  // This lets us achieve LOWER latency than uniform throttle at same power!
   
   if(_per_router && n_routers > 1) {
-    // === PER-ROUTER CLASS-AWARE DIFFERENTIATED CONTROL ===
+    // === PER-ROUTER DIFFERENTIATED CONTROL ===
+    // Strategy: Compute load-weighted frequency allocation
+    // High-load routers get high freq, idle routers get low freq
     
     // 1. Collect signals for each router
     std::vector<double> signals(n_routers);
-    double max_signal = 0.0, sum_signal = 0.0;
+    double max_signal = 0.0;
+    double sum_signal = 0.0;
     for(size_t r = 0; r < n_routers; ++r) {
       if(lower_str == "queue") {
         signals[r] = pwr.router_occupancy[r];
@@ -75,85 +58,101 @@ void HWReactiveDVFSPolicy::Update(const PowerTelemetry &pwr, NetworkControl &net
       max_signal = std::max(max_signal, signals[r]);
       sum_signal += signals[r];
     }
-    double avg_signal = (n_routers > 0) ? (sum_signal / n_routers) : 0.0;
     
-    // 2. Compute power budget with smooth adjustment
-    double target_base = _high_scale;
+    // 2. Compute priority scores (higher load = higher priority = higher freq)
+    std::vector<double> priorities(n_routers);
+    double sum_priorities = 0.0;
+    for(size_t r = 0; r < n_routers; ++r) {
+      if(max_signal > 1e-9) {
+        priorities[r] = signals[r] / max_signal;
+      } else {
+        priorities[r] = 1.0; // all idle, treat equally
+      }
+      // Apply sqrt to make distribution less extreme
+      priorities[r] = std::pow(priorities[r], 0.5);
+      sum_priorities += priorities[r];
+    }
+    
+    // 3. Compute power budget allocation
+    double base_scale = _high_scale;
     if(pwr.headroom < 0.0 && pwr.power_cap > 0.0) {
-      double over = -pwr.headroom / pwr.power_cap;
-      target_base = _high_scale * (1.0 - std::min(over * 1.2, 0.35));
+      double over_ratio = -pwr.headroom / pwr.power_cap;
+      base_scale = _current_scale * (1.0 - std::min(over_ratio * 1.5, 0.4));
+      base_scale = std::max(base_scale, _low_scale);
     }
-    double base_scale = 0.7 * _current_scale + 0.3 * target_base;
-    base_scale = std::max(_low_scale, std::min(_high_scale, base_scale));
     
-    // 3. CLASS-AWARE frequency allocation
-    if(_router_scales.size() < n_routers) {
-      _router_scales.resize(n_routers, _high_scale);
-    }
+    // 4. Allocate frequencies based on priority
+    double avg_priority = sum_priorities / n_routers;
     
     for(size_t r = 0; r < n_routers; ++r) {
-      double rel_load = (max_signal > 1e-9) ? signals[r] / max_signal : 0.0;
       double target_scale;
-      
-      if(priority_stress > 0.3) {
-        // === PRIORITY CLASS STRESSED - boost high-load routers ===
-        double boost = std::min(priority_stress, 1.0) * 0.3;  // Up to 30% boost
-        if(rel_load > 0.5) {
-          // Hot router: full boost
-          target_scale = base_scale + boost * (_high_scale - base_scale);
-          target_scale = std::min(_high_scale, target_scale * (1.0 + boost * 0.2));
-        } else if(rel_load > 0.3) {
-          // Warm router: partial boost
-          target_scale = base_scale + 0.5 * boost * (_high_scale - base_scale);
-        } else {
-          // Cold router: maintain minimal to save power for hot ones
-          target_scale = _low_scale + 0.3 * (base_scale - _low_scale);
-        }
+      if(priorities[r] >= avg_priority) {
+        double t = (avg_priority < 1.0) ? 
+                   (priorities[r] - avg_priority) / (1.0 - avg_priority) : 0.0;
+        target_scale = base_scale + t * (_high_scale - base_scale);
       } else {
-        // === PRIORITY CLASS OK - normal differentiation ===
-        if(signals[r] > avg_signal * 1.2) {
-          // Hot router: keep ready
-          target_scale = base_scale + 0.3 * (_high_scale - base_scale);
-        } else if(signals[r] < avg_signal * 0.5) {
-          // Cold router: save power
-          target_scale = _low_scale + 0.4 * (base_scale - _low_scale);
-        } else {
-          // Normal router: base scale
-          target_scale = base_scale;
-        }
+        double t = (avg_priority > 0.0) ? priorities[r] / avg_priority : 0.0;
+        target_scale = _low_scale + t * (base_scale - _low_scale);
       }
-      
-      // Smooth per-router transition
-      target_scale = 0.6 * _router_scales[r] + 0.4 * target_scale;
       target_scale = std::max(_low_scale, std::min(_high_scale, target_scale));
       net.SetRouterSpeed(static_cast<int>(r), target_scale);
-      _router_scales[r] = target_scale;
     }
     
     _current_scale = base_scale;
     _last_change_epoch = epoch;
     
-    std::cout << "HW_REACTIVE_CLASS: epoch=" << epoch 
-              << " class" << _control_class << "_lat=" << priority_latency
-              << " stress=" << priority_stress
-              << " base=" << base_scale << std::endl;
+    std::cout << "HW_REACTIVE_DIFF: epoch=" << epoch 
+              << " max_signal=" << max_signal
+              << " base_scale=" << base_scale
+              << " headroom=" << pwr.headroom << std::endl;
     
   } else {
-    // === GLOBAL CLASS-AWARE CONTROL ===
+    // === GLOBAL CONTROL (single domain) WITH CLASS AWARENESS ===
+    auto latency_signal = [&](const PowerTelemetry &pt)->double {
+      if(!pt.class_latency_p99.empty() && _control_class >= 0 &&
+         _control_class < static_cast<int>(pt.class_latency_p99.size())) {
+        return pt.class_latency_p99[_control_class];
+      }
+      if(!pt.class_latency_p99.empty()) return pt.class_latency_p99[0];
+      return 0.0;
+    };
+
+    // Get control class latency for SLO-aware decisions
+    double control_latency = latency_signal(pwr);
     
+    // PROACTIVE SLO PROTECTION: Be more cautious as we approach SLO
+    bool latency_ok = (_control_slo <= 0.0) || (control_latency <= _control_slo);
+    bool latency_comfortable = (_control_slo <= 0.0) || (control_latency <= _control_slo * 0.7);
+    double latency_slack = (_control_slo > 0.0 && control_latency > 0.0) 
+                          ? (_control_slo - control_latency) / _control_slo : 1.0;
+
     auto pick_scale = [&](double val, double headroom)->double {
-      // Priority class override
-      if(priority_stress > 0.3) return _high_scale;
-      
+      // CLASS-AWARE: If control class latency exceeds SLO, force high scale
+      if(!latency_ok) {
+        return _high_scale;
+      }
+      // If approaching SLO (< 70% slack), boost frequency to maintain headroom
+      if(!latency_comfortable && _control_slo > 0.0) {
+        // Interpolate between current and high based on how close to SLO
+        double boost_factor = 1.0 - latency_slack;  // 0.0 at 100% slack, 0.3 at 70% slack
+        return _current_scale + boost_factor * (_high_scale - _current_scale);
+      }
       if((lower_str == "latency") && (_control_slo > 0.0) && (val > _control_slo)) {
         return _high_scale;
       }
       if(val >= _high_thresh) return _high_scale;
       if(val <= _low_thresh) {
-        if((_headroom_margin > 0.0) && (headroom <= _headroom_margin)) {
-          return -1.0;
+        // Only throttle aggressively if latency has good slack
+        if(latency_comfortable) {
+          if((_headroom_margin > 0.0) && (headroom <= _headroom_margin)) {
+            return -1.0;
+          }
+          // Throttle proportionally to latency slack
+          double throttle_range = _high_scale - _low_scale;
+          double target_scale = _low_scale + latency_slack * throttle_range * 0.5;
+          return std::max(_low_scale, target_scale);
         }
-        return _low_scale;
+        return -1.0;  // Keep current if latency not comfortable
       }
       return -1.0;
     };
@@ -166,26 +165,33 @@ void HWReactiveDVFSPolicy::Update(const PowerTelemetry &pwr, NetworkControl &net
     } else if(lower_str == "stall") {
       sig = norm_signal(pwr.router_stall_rate);
     } else if(lower_str == "latency") {
-      sig = priority_latency;
+      sig = control_latency;
     }
     
     double target = pick_scale(sig, pwr.headroom);
     if(target < 0.0) target = _current_scale;
     
-    // Power cap enforcement
+    // Power cap enforcement - but gentler if control latency is high
     if(pwr.headroom < 0.0 && pwr.power_cap > 0.0) {
-      double over = -pwr.headroom / pwr.power_cap;
-      target = target * (1.0 - std::min(over * 1.5, 0.4));
+      double over_ratio = -pwr.headroom / pwr.power_cap;
+      double throttle_factor = 2.0;
+      // If control class is struggling or approaching SLO, reduce throttling intensity
+      if(!latency_ok) {
+        throttle_factor = 0.5;  // Minimal throttling when exceeding SLO
+      } else if(!latency_comfortable) {
+        throttle_factor = 1.0;  // Gentler throttling when approaching SLO
+      }
+      target = target * (1.0 - std::min(over_ratio * throttle_factor, 0.3));
       target = std::max(target, _low_scale);
     }
     
-    // Smooth transition
-    target = 0.7 * _current_scale + 0.3 * std::max(_low_scale, std::min(_high_scale, target));
+    target = std::max(_low_scale, std::min(_high_scale, target));
     
-    std::cout << "HW_REACTIVE: epoch=" << epoch 
-              << " class_lat=" << priority_latency 
-              << " sig=" << sig 
-              << " scale=" << target << std::endl;
+    std::cout << "HW_REACTIVE: epoch=" << epoch << " signal=" << sig 
+              << " target=" << target << " ctrl_lat=" << control_latency
+              << " ctrl_slo=" << _control_slo << " lat_ok=" << latency_ok
+              << " lat_comf=" << latency_comfortable << " slack=" << latency_slack
+              << " headroom=" << pwr.headroom << std::endl;
     
     net.SetDomainSpeed(0, target);
     _current_scale = target;

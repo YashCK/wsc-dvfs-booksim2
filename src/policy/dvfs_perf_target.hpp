@@ -23,7 +23,6 @@ private:
   bool _per_router;
   double _headroom_margin;
   std::vector<double> _prev_scale;
-  std::vector<double> _integral_err;  // For PI control
   void _EnsureSize(size_t n);
 };
 

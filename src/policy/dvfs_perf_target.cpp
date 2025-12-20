@@ -128,18 +128,30 @@ void PerfTargetDVFSPolicy::Update(const PowerTelemetry &pwr, NetworkControl &net
     double current_latency = measure_latency();
     double target_scale = _prev_scale[0];
     
-    // Compute latency slack: how much of SLO budget are we using?
-    double slack = 1.0;  // Default: full slack (no latency)
-    if(_target > 0.0 && current_latency > 0.0) {
-      slack = (_target - current_latency) / _target;  // 1.0 = 100% slack, 0.0 = at SLO
+    // CRITICAL: If no packets completed this epoch (latency=0), maintain current scale
+    // Don't assume "no latency" means "can throttle" - it means no data!
+    if(current_latency < 1e-9) {
+      // No latency data - maintain previous scale, don't change anything
+      target_scale = _prev_scale[0];
+      
+      std::cout << "PERF_TARGET: epoch=" << epoch 
+                << " latency=0 (no data)"
+                << " maintaining_scale=" << target_scale
+                << " headroom=" << pwr.headroom << std::endl;
+      
+      net.SetDomainSpeed(0, target_scale);
+      return;  // Early exit - no control action on missing data
     }
     
-    if(current_latency > _target && current_latency > 1e-9) {
+    // Compute latency slack: how much of SLO budget are we using?
+    double slack = (_target - current_latency) / _target;  // 1.0 = 100% slack, 0.0 = at SLO
+    
+    if(current_latency > _target) {
       // Latency exceeds SLO - boost aggressively
       double overshoot = (current_latency - _target) / _target;
       double delta = _kp * (1.0 + overshoot);  // More aggressive boost
       target_scale = clamp(_prev_scale[0] + delta);
-    } else if(current_latency > 1e-9) {
+    } else {
       // Latency within SLO - balance between latency and power
       if(slack < 0.3) {
         // Less than 30% slack - boost to maintain headroom

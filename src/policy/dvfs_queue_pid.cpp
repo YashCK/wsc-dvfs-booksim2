@@ -122,7 +122,9 @@ void QueuePIDPolicy::Update(const PowerTelemetry &pwr, NetworkControl &net, int 
     
   } else {
     // === GLOBAL PID CONTROL WITH CLASS AWARENESS ===
-    // Use both queue occupancy and control class latency for feedback
+    // CORRECTED: Use queue occupancy as congestion signal
+    // High occupancy → congestion → need to MAINTAIN high frequency
+    // Low occupancy → healthy → can throttle for power savings
     
     double meas = 0.0;
     if(!pwr.router_occupancy.empty()) {
@@ -137,44 +139,71 @@ void QueuePIDPolicy::Update(const PowerTelemetry &pwr, NetworkControl &net, int 
       control_latency = pwr.class_latency_p99[_control_class];
     }
     
-    // PID: we want to maintain occupancy near target
-    // If occupancy > target (congested): speed up
-    // If occupancy < target (idle): slow down for power
-    double err = meas - _target;
-    
-    // CLASS-AWARE ADJUSTMENT: If control class latency exceeds SLO, boost speed
-    double latency_boost = 0.0;
-    if(_control_slo > 0.0 && control_latency > _control_slo) {
-      // Control class is exceeding SLO - need to prioritize speed
-      double overshoot = (control_latency - _control_slo) / _control_slo;
-      latency_boost = std::min(overshoot * 0.2, 0.3);  // Up to 30% boost
+    // CRITICAL: If no latency data (ctrl_lat=0), maintain previous scale
+    // Don't make control decisions without feedback
+    if(control_latency < 1e-9 && _control_slo > 0.0) {
+      std::cout << "QUEUE_PID: epoch=" << epoch 
+                << " ctrl_lat=0 (no data) maintaining_scale=" << _prev_scale[0]
+                << " headroom=" << pwr.headroom << std::endl;
+      net.SetDomainSpeed(0, _prev_scale[0]);
+      return;
     }
     
-    _int_err[0] = _int_err[0] * 0.9 + err;
+    // Compute base scale from occupancy
+    double occ_ratio = meas / std::max(_target, 0.001);  // How congested vs target
+    double base_scale;
+    
+    if(occ_ratio >= 1.0) {
+      // At or above target occupancy - run at max speed
+      base_scale = _max_scale;
+    } else {
+      // Below target - can throttle, but maintain some headroom
+      // Scale linearly from min_scale (at 0% occupancy) to max_scale (at target)
+      base_scale = _min_scale + occ_ratio * (_max_scale - _min_scale);
+    }
+    
+    // CLASS-AWARE LATENCY OVERRIDE: If control latency exceeds SLO, force high speed
+    // This takes PRIORITY over occupancy-based scaling
+    bool latency_override = false;
+    if(_control_slo > 0.0 && control_latency > _control_slo) {
+      // Control class is exceeding SLO - FORCE max speed, ignore power cap
+      base_scale = _max_scale;
+      latency_override = true;
+    } else if(_control_slo > 0.0 && control_latency > _control_slo * 0.7) {
+      // Approaching SLO - boost towards max
+      double urgency = (control_latency - _control_slo * 0.7) / (_control_slo * 0.3);
+      base_scale = std::max(base_scale, _min_scale + urgency * (_max_scale - _min_scale));
+    }
+    
+    // PID for smooth transitions (derivative dampening)
+    double err = base_scale - _prev_scale[0];  // Error is difference from previous
+    _int_err[0] = _int_err[0] * 0.5 + err;     // Integral with decay
     double deriv = err - _prev_err[0];
     
-    // Positive gains: congestion → positive error → speed up
-    double delta = std::abs(_kp) * err + std::abs(_ki) * _int_err[0] + std::abs(_kd) * deriv;
-    double new_scale = clamp(_prev_scale[0] + delta + latency_boost);
+    // Small PID correction for smoothing (gains should be small, e.g., 0.1-0.5)
+    double smooth_kp = std::min(std::abs(_kp), 1.0) * 0.1;  // Limit gain
+    double pid_adjust = smooth_kp * err + std::abs(_ki) * 0.01 * _int_err[0] - std::abs(_kd) * 0.1 * deriv;
     
-    // Power cap enforcement - but be gentler if control latency is high
-    if(pwr.headroom < 0.0 && pwr.power_cap > 0.0) {
+    double new_scale = clamp(base_scale + pid_adjust);
+    
+    // Power cap enforcement - but SKIP if latency override is active
+    if(!latency_override && pwr.headroom < 0.0 && pwr.power_cap > 0.0) {
       double over_ratio = -pwr.headroom / pwr.power_cap;
       double throttle_factor = 1.5;
       // If control class is struggling, reduce throttling intensity
-      if(_control_slo > 0.0 && control_latency > _control_slo * 0.8) {
-        throttle_factor = 1.0;  // Gentler throttling when latency is high
+      if(_control_slo > 0.0 && control_latency > _control_slo * 0.7) {
+        throttle_factor = 0.5;  // Minimal throttling when latency is approaching SLO
       }
-      new_scale = new_scale * (1.0 - std::min(over_ratio * throttle_factor, 0.4));
+      new_scale = new_scale * (1.0 - std::min(over_ratio * throttle_factor, 0.3));
       new_scale = clamp(new_scale);
     }
     
     std::cout << "QUEUE_PID: epoch=" << epoch 
-              << " target=" << _target 
-              << " meas=" << meas 
-              << " err=" << err 
-              << " delta=" << delta 
-              << " latency_boost=" << latency_boost
+              << " occ=" << meas 
+              << " target=" << _target
+              << " occ_ratio=" << occ_ratio
+              << " base=" << base_scale
+              << " new=" << new_scale
               << " ctrl_lat=" << control_latency
               << " ctrl_slo=" << _control_slo
               << " headroom=" << pwr.headroom << std::endl;

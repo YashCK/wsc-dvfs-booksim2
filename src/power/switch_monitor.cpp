@@ -27,6 +27,8 @@
 
 #include "switch_monitor.hpp"
 
+#include <algorithm>
+
 #include "flit.hpp"
 
 SwitchMonitor::SwitchMonitor( int inputs, int outputs, int classes )
@@ -64,4 +66,9 @@ void SwitchMonitor::display(ostream & os) const {
 ostream & operator<<( ostream & os, SwitchMonitor const & obj ) {
   obj.display(os);
   return os ;
+}
+
+void SwitchMonitor::Reset() {
+  _cycles = 0;
+  std::fill(_event.begin(), _event.end(), 0);
 }

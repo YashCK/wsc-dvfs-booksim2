@@ -1,0 +1,3 @@
+class,buffer_busy,buffer_conflict,buffer_full,buffer_reserved,crossbar_conflict
+0,0.00319688,0.0497469,0.00044375,0.321288,5.76453
+1,0.0033375,0.0455625,0.00054375,0.323966,5.83282

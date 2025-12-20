@@ -59,7 +59,7 @@ Router::Router( const Configuration& config,
 		Module *parent, const string & name, int id,
 		int inputs, int outputs ) :
 TimedModule( parent, name ), _id( id ), _inputs( inputs ), _outputs( outputs ),
-   _partial_internal_cycles(0.0)
+   _partial_internal_cycles(0.0), _freq_scale(1.0), _freq_domain(0)
 {
   _crossbar_delay   = ( config.GetInt( "st_prepare_delay" ) + 
 			config.GetInt( "st_final_delay" ) );
@@ -104,7 +104,7 @@ void Router::AddOutputChannel( FlitChannel *channel, CreditChannel *backchannel 
 
 void Router::Evaluate( )
 {
-  _partial_internal_cycles += _internal_speedup;
+  _partial_internal_cycles += _internal_speedup * _freq_scale;
   while( _partial_internal_cycles >= 1.0 ) {
     _InternalStep( );
     _partial_internal_cycles -= 1.0;
@@ -148,7 +148,6 @@ Router *Router::NewRouter( const Configuration& config,
 
   return r;
 }
-
 
 
 

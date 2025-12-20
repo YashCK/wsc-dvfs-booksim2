@@ -39,9 +39,15 @@
 #include "random_utils.hpp" 
 #include "vc.hpp"
 #include "packet_reply_info.hpp"
+#include "policy/policy_factory.hpp"
+#include "power/buffer_monitor.hpp"
+#include <cmath>
+#include "routers/iq_router.hpp"
+#include <sys/stat.h>
+#include <sys/types.h>
 
 TrafficManager * TrafficManager::New(Configuration const & config,
-                                     vector<Network *> const & net)
+				     vector<Network *> const & net)
 {
     TrafficManager * result = NULL;
     string sim_type = config.GetStr("sim_type");
@@ -221,6 +227,155 @@ TrafficManager::TrafficManager( const Configuration &config, const vector<Networ
         _class_priority.push_back(config.GetInt("class_priority"));
     }
     _class_priority.resize(_classes, _class_priority.back());
+    _class_cfg = ParseClassConfig(config, _classes);
+    _policy_telemetry.class_latency_p99.assign(_classes, 0.0);
+
+    _class_assigner = MakeClassAssigner(config, _classes);
+    _priority_policy = MakePriorityPolicy(config);
+    _dvfs_policy = MakeDVFSPolicy(config);
+    _channel_width = config.GetInt("channel_width");
+    _use_netrace = (config.GetInt("use_netrace") > 0);
+    _netrace_class = config.GetInt("netrace_class");
+    if(_netrace_class < 0) _netrace_class = 0;
+    if(_netrace_class >= _classes) _netrace_class = _classes - 1;
+    _netrace_use_addr_size = (config.GetInt("netrace_use_addr_size") > 0);
+    _netrace_class_from_node_types =
+        (config.GetInt("netrace_class_from_node_types") > 0);
+    if(_use_netrace) {
+        string netrace_file = config.GetStr("netrace_file");
+        if(netrace_file.empty()) {
+            Error("use_netrace set but netrace_file not provided.");
+        }
+        int netrace_region = config.GetInt("netrace_region");
+        bool netrace_ignore_deps = (config.GetInt("netrace_ignore_deps") > 0);
+        int netrace_scale = config.GetInt("netrace_scale");
+        _netrace_adapter.reset(
+            new NetraceAdapter(netrace_file, _nodes, netrace_ignore_deps,
+                               netrace_region, netrace_scale));
+    }
+    _dvfs_epoch = config.GetInt("dvfs_epoch");
+    _last_dvfs_epoch = 0;
+    _power_telemetry.router_power.assign(_routers, 0.0);
+    _dvfs_freqs = config.GetFloatArray("dvfs_freqs");
+    _dvfs_voltages = config.GetFloatArray("dvfs_voltages");
+    if(_dvfs_freqs.empty()) {
+        _dvfs_freqs.push_back(1.0);
+    }
+    if(_dvfs_voltages.empty()) {
+        _dvfs_voltages.push_back(1.0);
+    }
+    _dvfs_voltages.resize(_dvfs_freqs.size(), _dvfs_voltages.back());
+    _power_dyn_base = config.GetFloat("power_dyn_base");
+    _power_leak_base = config.GetFloat("power_leak_base");
+    _use_orion = config.GetInt("use_orion") > 0;
+    _output_dir = config.GetStr("output_dir");
+    _run_name = config.GetStr("run_name");
+    _latency_csv_name = config.GetStr("latency_csv");
+    _stall_csv_name = config.GetStr("stall_csv");
+    _throughput_csv_name = config.GetStr("throughput_csv");
+    _summary_csv_name = config.GetStr("summary_csv");
+    _epoch_csv_name = config.GetStr("epoch_csv");
+    _energy_out = NULL;
+    _epoch_out = NULL;
+    _power_cap = config.GetFloat("power_cap");
+    _dvfs_log_interval = config.GetInt("dvfs_log_interval");
+    if(_dvfs_log_interval <= 0) _dvfs_log_interval = _dvfs_epoch;
+    _dvfs_log_last = 0;
+    _dvfs_power_avg_sum = 0.0;
+    _dvfs_power_avg_count = 0;
+    _dvfs_log_out = NULL;
+    _dvfs_log_name = config.GetStr("dvfs_log");
+    auto ensure_dir = [](const string &path) {
+        if(path.empty()) return;
+        size_t pos = 0;
+        while(true) {
+            pos = path.find('/', pos + 1);
+            string sub = path.substr(0, pos);
+            if(sub.empty()) continue;
+            mkdir(sub.c_str(), 0755);
+            if(pos == string::npos) break;
+        }
+    };
+    string base_dir = _output_dir.empty() ? "sims" : _output_dir;
+    if(!_run_name.empty()) {
+        base_dir += "/" + _run_name;
+    }
+    ensure_dir(base_dir);
+    _base_output_dir = base_dir;
+    std::string energy_cfg = config.GetStr("energy_csv");
+    if(!energy_cfg.empty()) {
+        if(energy_cfg == "-") {
+            _energy_out = &cout;
+        } else {
+            std::string energy_path = (energy_cfg[0] == '/') ? energy_cfg : (base_dir + "/" + energy_cfg);
+            std::ofstream *energy_stream = new std::ofstream(energy_path.c_str());
+            if(!energy_stream->is_open()) {
+                cerr << "Could not open energy CSV " << energy_path << " for writing" << endl;
+                delete energy_stream;
+            } else {
+                _energy_out = energy_stream;
+                *_energy_out << "epoch,time,domain,freq,dyn_power,leak_power,total_power,dyn_energy,leak_energy,total_energy";
+                for(int c = 0; c < _classes; ++c) {
+                    *_energy_out << ",class" << c << "_energy";
+                }
+                *_energy_out << endl;
+            }
+        }
+    }
+    std::string epoch_cfg = config.GetStr("epoch_csv");
+    if(!epoch_cfg.empty()) {
+        if(epoch_cfg == "-") {
+            _epoch_out = &cout;
+        } else {
+            std::string epoch_path = (epoch_cfg[0] == '/') ? epoch_cfg : (base_dir + "/" + epoch_cfg);
+            std::ofstream *epoch_stream = new std::ofstream(epoch_path.c_str());
+            if(!epoch_stream->is_open()) {
+                cerr << "Could not open epoch CSV " << epoch_path << " for writing" << endl;
+                delete epoch_stream;
+            } else {
+                _epoch_out = epoch_stream;
+                *_epoch_out << "epoch,time,total_power,headroom,avg_power";
+                for(int c = 0; c < _classes; ++c) {
+                    *_epoch_out << ",class" << c << "_p50"
+                                << ",class" << c << "_p95"
+                                << ",class" << c << "_p99"
+                                << ",class" << c << "_qdel_p99"
+                                << ",class" << c << "_throughput";
+#ifdef TRACK_STALLS
+                    *_epoch_out << ",class" << c << "_stall_busy_rate"
+                                << ",class" << c << "_stall_full_rate"
+                                << ",class" << c << "_stall_conflict_rate"
+                                << ",class" << c << "_stall_reserved_rate"
+                                << ",class" << c << "_stall_xbar_rate";
+#endif
+                }
+                *_epoch_out << endl;
+            }
+        }
+    }
+    string dvfs_path;
+    if(!_dvfs_log_name.empty()) {
+        if(_dvfs_log_name == "-") {
+            dvfs_path = "-";
+        } else if(!_dvfs_log_name.empty() && _dvfs_log_name[0] == '/') {
+            dvfs_path = _dvfs_log_name;
+        } else {
+            dvfs_path = base_dir + "/" + _dvfs_log_name;
+        }
+    } else {
+        dvfs_path = base_dir + "/power_log";
+    }
+    if(dvfs_path == "-") {
+        _dvfs_log_out = &cout;
+    } else {
+        std::ofstream *out = new ofstream(dvfs_path.c_str());
+        if(out->good()) {
+            _dvfs_log_out = out;
+        } else {
+            delete out;
+            _dvfs_log_out = NULL;
+        }
+    }
 
     vector<string> injection_process = config.GetStrArray("injection_process");
     injection_process.resize(_classes, injection_process.back());
@@ -296,6 +451,66 @@ TrafficManager::TrafficManager( const Configuration &config, const vector<Networ
     _router.resize(_subnets);
     for (int i=0; i < _subnets; ++i) {
         _router[i] = _net[i]->GetRouters();
+    }
+    _router_domains = config.GetIntArray("router_domains");
+    if(_router_domains.empty()) {
+        _router_domains.assign(_routers, config.GetInt("router_domains"));
+    }
+    _router_domains.resize(_routers, _router_domains.back());
+    _num_domains = 0;
+    for(size_t i = 0; i < _router_domains.size(); ++i) {
+        _num_domains = std::max(_num_domains, _router_domains[i] + 1);
+    }
+    if(_num_domains <= 0) _num_domains = 1;
+    vector<double> min_scales = config.GetFloatArray("dvfs_min_scale");
+    if(min_scales.empty()) min_scales.push_back(config.GetFloat("dvfs_min_scale"));
+    vector<double> max_scales = config.GetFloatArray("dvfs_max_scale");
+    if(max_scales.empty()) max_scales.push_back(config.GetFloat("dvfs_max_scale"));
+    _domain_min_scale.resize(_num_domains, min_scales.back());
+    _domain_max_scale.resize(_num_domains, max_scales.back());
+    for(int d = 0; d < _num_domains; ++d) {
+        if(d < static_cast<int>(min_scales.size())) _domain_min_scale[d] = min_scales[d];
+        if(d < static_cast<int>(max_scales.size())) _domain_max_scale[d] = max_scales[d];
+        if(_domain_max_scale[d] < _domain_min_scale[d]) std::swap(_domain_max_scale[d], _domain_min_scale[d]);
+    }
+    auto parse_domain_lists = [](const string &s)->vector<vector<double> > {
+        vector<vector<double> > res;
+        if(s.empty()) return res;
+        size_t start = 0;
+        while(true) {
+            size_t end = s.find('|', start);
+            string chunk = s.substr(start, (end == string::npos) ? string::npos : (end - start));
+            res.push_back(tokenize_float(chunk));
+            if(end == string::npos) break;
+            start = end + 1;
+        }
+        return res;
+    };
+    vector<vector<double> > dom_freq_lists = parse_domain_lists(config.GetStr("dvfs_domain_freqs"));
+    vector<vector<double> > dom_volt_lists = parse_domain_lists(config.GetStr("dvfs_domain_voltages"));
+    _domain_freqs.assign(_num_domains, _dvfs_freqs);
+    _domain_voltages.assign(_num_domains, _dvfs_voltages);
+    for(int d = 0; d < _num_domains; ++d) {
+        if(d < static_cast<int>(dom_freq_lists.size()) && !dom_freq_lists[d].empty()) {
+            _domain_freqs[d] = dom_freq_lists[d];
+        }
+        if(d < static_cast<int>(dom_volt_lists.size()) && !dom_volt_lists[d].empty()) {
+            _domain_voltages[d] = dom_volt_lists[d];
+        }
+        if(_domain_voltages[d].empty()) {
+            _domain_voltages[d].push_back(1.0);
+        }
+        _domain_voltages[d].resize(_domain_freqs[d].size(), _domain_voltages[d].back());
+    }
+    for(int subnet = 0; subnet < _subnets; ++subnet) {
+        for(int r = 0; r < _routers; ++r) {
+            _router[subnet][r]->SetFrequencyDomain(_router_domains[r]);
+        }
+    }
+    _router_freq_scale.assign(_routers, 1.0);
+    for(int r = 0; r < _routers; ++r) {
+        int d = _router_domains[r];
+        _router_freq_scale[r] = _ClampDomainScale(d, _router_freq_scale[r]);
     }
 
     //seed the network
@@ -455,16 +670,23 @@ TrafficManager::TrafficManager( const Configuration &config, const vector<Networ
     _overall_min_plat.resize(_classes, 0.0);
     _overall_avg_plat.resize(_classes, 0.0);
     _overall_max_plat.resize(_classes, 0.0);
+    _plat_pcnt_stats.resize(_classes, static_cast<PercentileStats *>(NULL));
+    _epoch_plat_pcnt_stats.resize(_classes, static_cast<PercentileStats *>(NULL));
 
     _nlat_stats.resize(_classes);
     _overall_min_nlat.resize(_classes, 0.0);
     _overall_avg_nlat.resize(_classes, 0.0);
     _overall_max_nlat.resize(_classes, 0.0);
+    _nlat_pcnt_stats.resize(_classes, static_cast<PercentileStats *>(NULL));
+    _epoch_nlat_pcnt_stats.resize(_classes, static_cast<PercentileStats *>(NULL));
 
     _flat_stats.resize(_classes);
     _overall_min_flat.resize(_classes, 0.0);
     _overall_avg_flat.resize(_classes, 0.0);
     _overall_max_flat.resize(_classes, 0.0);
+    _flat_pcnt_stats.resize(_classes, static_cast<PercentileStats *>(NULL));
+    _qdel_pcnt_stats.resize(_classes, static_cast<PercentileStats *>(NULL));
+    _epoch_qdel_pcnt_stats.resize(_classes, static_cast<PercentileStats *>(NULL));
 
     _frag_stats.resize(_classes);
     _overall_min_frag.resize(_classes, 0.0);
@@ -484,6 +706,8 @@ TrafficManager::TrafficManager( const Configuration &config, const vector<Networ
     _overall_min_sent_packets.resize(_classes, 0.0);
     _overall_avg_sent_packets.resize(_classes, 0.0);
     _overall_max_sent_packets.resize(_classes, 0.0);
+    _epoch_sent_packets.resize(_classes, 0);
+    _epoch_accepted_packets.resize(_classes, 0);
     _accepted_packets.resize(_classes);
     _overall_min_accepted_packets.resize(_classes, 0.0);
     _overall_avg_accepted_packets.resize(_classes, 0.0);
@@ -509,6 +733,11 @@ TrafficManager::TrafficManager( const Configuration &config, const vector<Networ
     _overall_buffer_full_stalls.resize(_classes, 0);
     _overall_buffer_reserved_stalls.resize(_classes, 0);
     _overall_crossbar_conflict_stalls.resize(_classes, 0);
+    _epoch_buffer_busy_stalls.resize(_classes, 0.0);
+    _epoch_buffer_conflict_stalls.resize(_classes, 0.0);
+    _epoch_buffer_full_stalls.resize(_classes, 0.0);
+    _epoch_buffer_reserved_stalls.resize(_classes, 0.0);
+    _epoch_crossbar_conflict_stalls.resize(_classes, 0.0);
 #endif
 
     for ( int c = 0; c < _classes; ++c ) {
@@ -517,16 +746,26 @@ TrafficManager::TrafficManager( const Configuration &config, const vector<Networ
         tmp_name << "plat_stat_" << c;
         _plat_stats[c] = new Stats( this, tmp_name.str( ), 1.0, 1000 );
         _stats[tmp_name.str()] = _plat_stats[c];
+        _plat_pcnt_stats[c] = new PercentileStats();
+        _epoch_plat_pcnt_stats[c] = new PercentileStats();
         tmp_name.str("");
-
+  
         tmp_name << "nlat_stat_" << c;
         _nlat_stats[c] = new Stats( this, tmp_name.str( ), 1.0, 1000 );
         _stats[tmp_name.str()] = _nlat_stats[c];
+        _nlat_pcnt_stats[c] = new PercentileStats();
+        _epoch_nlat_pcnt_stats[c] = new PercentileStats();
         tmp_name.str("");
-
+  
         tmp_name << "flat_stat_" << c;
         _flat_stats[c] = new Stats( this, tmp_name.str( ), 1.0, 1000 );
         _stats[tmp_name.str()] = _flat_stats[c];
+        _flat_pcnt_stats[c] = new PercentileStats();
+        tmp_name.str("");
+
+        tmp_name << "qdel_stat_" << c;
+        _qdel_pcnt_stats[c] = new PercentileStats();
+        _epoch_qdel_pcnt_stats[c] = new PercentileStats();
         tmp_name.str("");
 
         tmp_name << "frag_stat_" << c;
@@ -589,6 +828,13 @@ TrafficManager::TrafficManager( const Configuration &config, const vector<Networ
 TrafficManager::~TrafficManager( )
 {
 
+    if(_netrace_adapter) {
+        for(auto &entry : _netrace_inflight) {
+            _netrace_adapter->OnEject(entry.second);
+        }
+        _netrace_inflight.clear();
+    }
+
     for ( int source = 0; source < _nodes; ++source ) {
         for ( int subnet = 0; subnet < _subnets; ++subnet ) {
             delete _buf_states[source][subnet];
@@ -600,6 +846,13 @@ TrafficManager::~TrafficManager( )
         delete _nlat_stats[c];
         delete _flat_stats[c];
         delete _frag_stats[c];
+        delete _plat_pcnt_stats[c];
+        delete _nlat_pcnt_stats[c];
+        delete _flat_pcnt_stats[c];
+        delete _qdel_pcnt_stats[c];
+        delete _epoch_plat_pcnt_stats[c];
+        delete _epoch_nlat_pcnt_stats[c];
+        delete _epoch_qdel_pcnt_stats[c];
         delete _hop_stats[c];
 
         delete _traffic_pattern[c];
@@ -617,6 +870,15 @@ TrafficManager::~TrafficManager( )
   
     if(gWatchOut && (gWatchOut != &cout)) delete gWatchOut;
     if(_stats_out && (_stats_out != &cout)) delete _stats_out;
+    if(_dvfs_log_out && (_dvfs_log_out != &cout)) {
+        delete static_cast<std::ofstream*>(_dvfs_log_out);
+    }
+    if(_energy_out && (_energy_out != &cout)) {
+        delete static_cast<std::ofstream*>(_energy_out);
+    }
+    if(_epoch_out && (_epoch_out != &cout)) {
+        delete static_cast<std::ofstream*>(_epoch_out);
+    }
 
 #ifdef TRACK_FLOWS
     if(_injected_flits_out) delete _injected_flits_out;
@@ -674,15 +936,16 @@ void TrafficManager::_RetireFlit( Flit *f, int dest )
        (_flat_stats[f->cl]->Max() < (f->atime - f->itime)))
         _slowest_flit[f->cl] = f->id;
     _flat_stats[f->cl]->AddSample( f->atime - f->itime);
+    _flat_pcnt_stats[f->cl]->AddSample( f->atime - f->itime);
     if(_pair_stats){
         _pair_flat[f->cl][f->src*_nodes+dest]->AddSample( f->atime - f->itime );
     }
       
-    if ( f->tail ) {
-        Flit * head;
-        if(f->head) {
-            head = f;
-        } else {
+        if ( f->tail ) {
+            Flit * head;
+            if(f->head) {
+                head = f;
+            } else {
             map<int, Flit *>::iterator iter = _retired_packets[f->cl].find(f->pid);
             assert(iter != _retired_packets[f->cl].end());
             head = iter->second;
@@ -725,12 +988,21 @@ void TrafficManager::_RetireFlit( Flit *f, int dest )
       
             _hop_stats[f->cl]->AddSample( f->hops );
 
-            if((_slowest_packet[f->cl] < 0) ||
-               (_plat_stats[f->cl]->Max() < (f->atime - head->itime)))
-                _slowest_packet[f->cl] = f->pid;
-            _plat_stats[f->cl]->AddSample( f->atime - head->ctime);
-            _nlat_stats[f->cl]->AddSample( f->atime - head->itime);
-            _frag_stats[f->cl]->AddSample( (f->atime - head->atime) - (f->id - head->id) );
+        if((_slowest_packet[f->cl] < 0) ||
+           (_plat_stats[f->cl]->Max() < (f->atime - head->itime)))
+            _slowest_packet[f->cl] = f->pid;
+        _plat_stats[f->cl]->AddSample( f->atime - head->ctime);
+        _nlat_stats[f->cl]->AddSample( f->atime - head->itime);
+        _plat_pcnt_stats[f->cl]->AddSample( f->atime - head->ctime);
+        _nlat_pcnt_stats[f->cl]->AddSample( f->atime - head->itime);
+        _epoch_plat_pcnt_stats[f->cl]->AddSample(f->atime - head->ctime);
+        _epoch_nlat_pcnt_stats[f->cl]->AddSample(f->atime - head->itime);
+        _frag_stats[f->cl]->AddSample( (f->atime - head->atime) - (f->id - head->id) );
+        int qdel = head->itime - head->ctime;
+        if(qdel >= 0) {
+            _qdel_pcnt_stats[f->cl]->AddSample(qdel);
+            _epoch_qdel_pcnt_stats[f->cl]->AddSample(qdel);
+        }
    
             if(_pair_stats){
                 _pair_plat[f->cl][f->src*_nodes+dest]->AddSample( f->atime - head->ctime );
@@ -740,6 +1012,14 @@ void TrafficManager::_RetireFlit( Flit *f, int dest )
     
         if(f != head) {
             head->Free();
+        }
+
+        if(_use_netrace && _netrace_adapter) {
+            auto it = _netrace_inflight.find(f->pid);
+            if(it != _netrace_inflight.end()) {
+                _netrace_adapter->OnEject(it->second);
+                _netrace_inflight.erase(it);
+            }
         }
     
     }
@@ -783,11 +1063,22 @@ int TrafficManager::_IssuePacket( int source, int cl )
 }
 
 void TrafficManager::_GeneratePacket( int source, int stype, 
-                                      int cl, int time )
+                                      int cl, int time,
+                                      int destination_override,
+                                      int size_override,
+                                      Flit::FlitType packet_type_override )
 {
     assert(stype!=0);
 
     Flit::FlitType packet_type = Flit::ANY_TYPE;
+    int assigned_cl = cl;
+    if(_class_assigner) {
+        assigned_cl = _class_assigner->Assign(source, -1, cl, _policy_telemetry);
+        if((assigned_cl < 0) || (assigned_cl >= _classes)) {
+            assigned_cl = cl;
+        }
+    }
+    cl = assigned_cl;
     int size = _GetNextPacketSize(cl); //input size 
     int pid = _cur_pid++;
     assert(_cur_pid);
@@ -826,6 +1117,16 @@ void TrafficManager::_GeneratePacket( int source, int stype,
             _repliesPending[source].pop_front();
             rinfo->Free();
         }
+    }
+
+    if(destination_override >= 0) {
+        packet_destination = destination_override;
+    }
+    if(size_override > 0) {
+        size = size_override;
+    }
+    if(packet_type_override != Flit::ANY_TYPE) {
+        packet_type = packet_type_override;
     }
 
     if ((packet_destination <0) || (packet_destination >= _nodes)) {
@@ -898,6 +1199,9 @@ void TrafficManager::_GeneratePacket( int source, int stype,
         default:
             f->pri = 0;
         }
+        if(_priority_policy) {
+            _priority_policy->OnEnqueue(*f, _class_cfg[f->cl], _policy_telemetry);
+        }
         if ( i == ( size - 1 ) ) { // Tail flit
             f->tail = true;
         } else {
@@ -920,6 +1224,70 @@ void TrafficManager::_GeneratePacket( int source, int stype,
 }
 
 void TrafficManager::_Inject(){
+
+    if(_use_netrace && _netrace_adapter) {
+        _netrace_adapter->AdvanceTo(_time);
+        for (int input = 0; input < _nodes; ++input) {
+            // Use default class unless overridden per-packet
+            int default_cl = _netrace_class;
+            if (_partial_packets[input][default_cl].empty() &&
+                _netrace_adapter->Ready(input, _time)) {
+                NetracePacket pkt = _netrace_adapter->PopReady(input, _time);
+                if (pkt.packet) {
+                    int bytes = nt_get_packet_size(pkt.packet);
+                    if (_netrace_use_addr_size && pkt.packet->addr > 0) {
+                        bytes = pkt.packet->addr;
+                    }
+                    int size_flits = 1;
+                    if (bytes > 0) {
+                        size_flits =
+                            (bytes * 8 + _channel_width - 1) / _channel_width;
+                        if (size_flits < 1) size_flits = 1;
+                    }
+                    Flit::FlitType packet_type = Flit::ANY_TYPE;
+                    switch(pkt.packet->type) {
+                    case 1: packet_type = Flit::READ_REQUEST; break;
+                    case 2: // ReadResp
+                    case 3: // ReadRespWithInvalidate
+                        packet_type = Flit::READ_REPLY; break;
+                    case 4: packet_type = Flit::WRITE_REQUEST; break;
+                    case 5: packet_type = Flit::WRITE_REPLY; break;
+                    default: packet_type = Flit::ANY_TYPE; break;
+                    }
+                    _packet_seq_no[input]++;
+                    _requestsOutstanding[input]++;
+                    int assigned_pid = _cur_pid;
+                    long long inject_cycle = pkt.cycle;
+                    if (inject_cycle < _time) inject_cycle = _time;
+                    if (inject_cycle > std::numeric_limits<int>::max()) {
+                        inject_cycle = std::numeric_limits<int>::max();
+                    }
+                    int cl = default_cl;
+                    if (_netrace_class_from_node_types) {
+                        cl = pkt.packet->node_types;
+                        if (cl < 0 || cl >= _classes) {
+                            cl = default_cl;
+                        }
+                    }
+                    _GeneratePacket(input, 1, cl,
+                                    static_cast<int>(inject_cycle),
+                                    static_cast<int>(pkt.packet->dst),
+                                    size_flits, packet_type);
+                    _netrace_inflight[assigned_pid] = pkt.packet;
+                }
+            }
+        }
+        if (_netrace_adapter->Done()) {
+            for (int input = 0; input < _nodes; ++input) {
+                for (int c = 0; c < _classes; ++c) {
+                    if (_partial_packets[input][c].empty()) {
+                        _qdrained[input][c] = true;
+                    }
+                }
+            }
+        }
+        return;
+    }
 
     for ( int input = 0; input < _nodes; ++input ) {
         for ( int c = 0; c < _classes; ++c ) {
@@ -953,6 +1321,7 @@ void TrafficManager::_Inject(){
 
 void TrafficManager::_Step( )
 {
+    _policy_telemetry.time = _time;
     bool flits_in_flight = false;
     for(int c = 0; c < _classes; ++c) {
         flits_in_flight |= !_total_in_flight_flits[c].empty();
@@ -981,6 +1350,7 @@ void TrafficManager::_Step( )
                     ++_accepted_flits[f->cl][n];
                     if(f->tail) {
                         ++_accepted_packets[f->cl][n];
+                        ++_epoch_accepted_packets[f->cl];
                     }
                 }
             }
@@ -1223,6 +1593,7 @@ void TrafficManager::_Step( )
                     ++_sent_flits[c][n];
                     if(f->head) {
                         ++_sent_packets[c][n];
+                        ++_epoch_sent_packets[c];
                     }
                 }
 	
@@ -1266,12 +1637,285 @@ void TrafficManager::_Step( )
         _net[subnet]->WriteOutputs( );
     }
 
+    _MaybeRunDVFS();
+
     ++_time;
     assert(_time);
     if(gTrace){
         cout<<"TIME "<<_time<<endl;
+  }
+
+}
+
+double TrafficManager::_ClampDomainScale(int domain, double scale) const {
+    if(domain < 0 || domain >= _num_domains) return scale;
+    double lo = _domain_min_scale[domain];
+    double hi = _domain_max_scale[domain];
+    if(hi < lo) std::swap(hi, lo);
+    if(scale < lo) scale = lo;
+    if(scale > hi) scale = hi;
+    return scale;
+}
+
+void TrafficManager::_MaybeRunDVFS() {
+    if(!_dvfs_policy || (_dvfs_epoch <= 0)) {
+        return;
+    }
+    if((_time - _last_dvfs_epoch) < _dvfs_epoch) {
+        return;
+    }
+    _last_dvfs_epoch = _time;
+
+    _power_telemetry.total_power = 0.0;
+    _power_telemetry.router_power.assign(_routers, 0.0);
+    _power_telemetry.router_occupancy.assign(_routers, 0.0);
+    _power_telemetry.router_injection_rate.assign(_routers, 0.0);
+    _power_telemetry.router_stall_rate.assign(_routers, 0.0);
+    _power_telemetry.class_latency_p50.assign(_classes, 0.0);
+    _power_telemetry.class_latency_p95.assign(_classes, 0.0);
+    _power_telemetry.class_latency_p99.assign(_classes, 0.0);
+    _power_telemetry.class_injection_rate.assign(_classes, 0.0);
+    _power_telemetry.class_throughput.assign(_classes, 0.0);
+    _power_telemetry.power_cap = _power_cap;
+    _power_telemetry.headroom = (_power_cap > 0.0) ? (_power_cap - _power_telemetry.total_power) : 0.0;
+    vector<double> router_dyn(_routers, 0.0);
+    vector<double> router_leak(_routers, 0.0);
+    vector<vector<long long> > router_class_activity(_routers, vector<long long>(_classes, 0));
+    if(_use_orion) {
+        for(int r = 0; r < _routers; ++r) {
+            IQRouter *iqr = dynamic_cast<IQRouter *>(_router[0][r]);
+            double freq_scale = _router_freq_scale[r];
+            double p = 0.0;
+            if(iqr) {
+                // occupancy fraction
+                double occ_sum = 0.0;
+                for(int in = 0; in < iqr->NumInputs(); ++in) {
+                    occ_sum += static_cast<double>(iqr->GetBufferOccupancy(in)) /
+                               static_cast<double>(iqr->GetBufferSize(in));
+                }
+                _power_telemetry.router_occupancy[r] =
+                    (iqr->NumInputs() > 0) ? (occ_sum / static_cast<double>(iqr->NumInputs())) : 0.0;
+                const BufferMonitor *bm = iqr->GetBufferMonitor();
+                if(bm) {
+                    const vector<int> &writes = bm->GetWrites();
+                    for(int c = 0; c < _classes; ++c) {
+                        long long sum = 0;
+                        for(int in = 0; in < bm->NumInputs(); ++in) {
+                            sum += writes[c + bm->NumClasses() * in];
+                        }
+                        router_class_activity[r][c] = sum;
+                        _power_telemetry.router_injection_rate[r] += sum;
+                    }
+                }
+                // simple stall rate proxy from stalls per epoch if available
+                double stall_sum = 0.0;
+#ifdef TRACK_STALLS
+                for(int c = 0; c < _classes; ++c) {
+                    stall_sum += iqr->GetBufferFullStalls(c);
+                    stall_sum += iqr->GetBufferBusyStalls(c);
+                }
+#endif
+                _power_telemetry.router_stall_rate[r] = stall_sum / std::max(1.0, static_cast<double>(_dvfs_epoch));
+                p = iqr->GetOrionPower(freq_scale);
+                iqr->ResetPowerMonitors();
+            }
+            _power_telemetry.router_power[r] = p;
+            router_dyn[r] = p;
+            _power_telemetry.total_power += p;
+        }
+    } else {
+        for(int r = 0; r < _routers; ++r) {
+            int domain = _router_domains[r];
+            const vector<double> &freqs = (domain >= 0 && domain < _num_domains && !_domain_freqs[domain].empty()) ? _domain_freqs[domain] : _dvfs_freqs;
+            const vector<double> &volts = (domain >= 0 && domain < _num_domains && !_domain_voltages[domain].empty()) ? _domain_voltages[domain] : _dvfs_voltages;
+            double base_freq = freqs.empty() ? 1.0 : freqs[0];
+            auto nearest_voltage = [&](double freq)->double {
+                double best_v = volts.empty() ? 1.0 : volts.back();
+                if(freqs.empty() || volts.empty()) return best_v;
+                double best_err = fabs(freq - freqs[0]);
+                best_v = volts[0];
+                for(size_t i = 0; i < freqs.size(); ++i) {
+                    double err = fabs(freq - freqs[i]);
+                    if(err < best_err) {
+                        best_err = err;
+                        best_v = volts[i];
+                    }
+                }
+                return best_v;
+            };
+            double freq = base_freq * _router_freq_scale[r];
+            double v = nearest_voltage(freq);
+            double dyn = _power_dyn_base * v * v * freq;
+            double leak = _power_leak_base * v;
+            double p = dyn + leak;
+            _power_telemetry.router_power[r] = p;
+            router_dyn[r] = dyn;
+            router_leak[r] = leak;
+            _power_telemetry.total_power += p;
+            Router *rr = _router[0][r];
+            double occ_sum = 0.0;
+            for(int in = 0; in < rr->NumInputs(); ++in) {
+                occ_sum += static_cast<double>(rr->GetBufferOccupancy(in)) /
+                           static_cast<double>(rr->GetBufferSize(in));
+            }
+            _power_telemetry.router_occupancy[r] =
+                (rr->NumInputs() > 0) ? (occ_sum / static_cast<double>(rr->NumInputs())) : 0.0;
+        }
+    }
+    _power_telemetry.headroom = (_power_cap > 0.0) ? (_power_cap - _power_telemetry.total_power) : 0.0;
+
+    struct TMControl : public NetworkControl {
+        explicit TMControl(TrafficManager* tm_in) : tm(tm_in) {}
+        TrafficManager* tm;
+        void SetRouterSpeed(int router_id, double freq_scale) override {
+            if((router_id < 0) || (router_id >= tm->_routers)) return;
+            int domain = tm->_router_domains[router_id];
+            double clamped = tm->_ClampDomainScale(domain, freq_scale);
+            tm->_router_freq_scale[router_id] = clamped;
+            for(int subnet = 0; subnet < tm->_subnets; ++subnet) {
+                tm->_router[subnet][router_id]->SetFrequencyScale(clamped);
+            }
+        }
+        void SetDomainSpeed(int domain_id, double freq_scale) override {
+            for(size_t r = 0; r < tm->_router_domains.size(); ++r) {
+                if(tm->_router_domains[r] == domain_id) {
+                    double clamped = tm->_ClampDomainScale(domain_id, freq_scale);
+                    tm->_router_freq_scale[r] = clamped;
+                    SetRouterSpeed(static_cast<int>(r), clamped);
+                }
+            }
+        }
+    } ctrl(this);
+
+    _dvfs_power_avg_sum += _power_telemetry.total_power;
+    _dvfs_power_avg_count++;
+
+    // Per-class latency percentiles for policy use
+    for(int c = 0; c < _classes; ++c) {
+        _power_telemetry.class_latency_p50[c] = _epoch_nlat_pcnt_stats[c]->Percentile(0.50);
+        _power_telemetry.class_latency_p95[c] = _epoch_nlat_pcnt_stats[c]->Percentile(0.95);
+        _power_telemetry.class_latency_p99[c] = _epoch_nlat_pcnt_stats[c]->Percentile(0.99);
+        _power_telemetry.class_injection_rate[c] = (_dvfs_epoch > 0) ? (static_cast<double>(_epoch_sent_packets[c]) / static_cast<double>(_dvfs_epoch)) : 0.0;
+        _power_telemetry.class_throughput[c] = (_dvfs_epoch > 0) ? (static_cast<double>(_epoch_accepted_packets[c]) / static_cast<double>(_dvfs_epoch)) : 0.0;
     }
 
+    bool do_log = (_time - _dvfs_log_last) >= _dvfs_log_interval;
+    double headroom = _power_cap > 0 ? (_power_cap - _power_telemetry.total_power) : 0.0;
+    double avg_power = (_dvfs_power_avg_count > 0) ? (_dvfs_power_avg_sum / static_cast<double>(_dvfs_power_avg_count)) : _power_telemetry.total_power;
+    if(do_log && _epoch_out) {
+        *_epoch_out << (_dvfs_epoch ? (_time / _dvfs_epoch) : 0) << "," << _time << ","
+                    << _power_telemetry.total_power << "," << headroom << "," << avg_power;
+        for(int c = 0; c < _classes; ++c) {
+            double p50 = _epoch_nlat_pcnt_stats[c]->Percentile(0.50);
+            double p95 = _epoch_nlat_pcnt_stats[c]->Percentile(0.95);
+            double p99 = _epoch_nlat_pcnt_stats[c]->Percentile(0.99);
+            double q99 = _epoch_qdel_pcnt_stats[c]->Percentile(0.99);
+            double throughput = (_dvfs_epoch > 0) ? (static_cast<double>(_epoch_accepted_packets[c]) / static_cast<double>(_dvfs_epoch)) : 0.0;
+            *_epoch_out << "," << p50 << "," << p95 << "," << p99 << "," << q99 << "," << throughput;
+#ifdef TRACK_STALLS
+            double denom = (_dvfs_epoch > 0) ? (static_cast<double>(_dvfs_epoch) * static_cast<double>(_subnets*_routers)) : 1.0;
+            *_epoch_out << "," << (_epoch_buffer_busy_stalls[c] / denom)
+                        << "," << (_epoch_buffer_full_stalls[c] / denom)
+                        << "," << (_epoch_buffer_conflict_stalls[c] / denom)
+                        << "," << (_epoch_buffer_reserved_stalls[c] / denom)
+                        << "," << (_epoch_crossbar_conflict_stalls[c] / denom);
+#endif
+            _epoch_nlat_pcnt_stats[c]->Clear();
+            _epoch_plat_pcnt_stats[c]->Clear();
+            _epoch_qdel_pcnt_stats[c]->Clear();
+            _epoch_sent_packets[c] = 0;
+            _epoch_accepted_packets[c] = 0;
+#ifdef TRACK_STALLS
+            _epoch_buffer_busy_stalls[c] = 0.0;
+            _epoch_buffer_conflict_stalls[c] = 0.0;
+            _epoch_buffer_full_stalls[c] = 0.0;
+            _epoch_buffer_reserved_stalls[c] = 0.0;
+            _epoch_crossbar_conflict_stalls[c] = 0.0;
+#endif
+        }
+        *_epoch_out << endl;
+    }
+    if(do_log && _energy_out) {
+        // domain aggregates
+        std::map<int, double> domain_dyn;
+        std::map<int, double> domain_leak;
+        std::map<int, double> domain_total;
+        std::map<int, double> domain_freq;
+        std::map<int, vector<long long> > domain_activity;
+        for(int r = 0; r < _routers; ++r) {
+            int d = _router_domains[r];
+            domain_dyn[d] += router_dyn[r];
+            domain_leak[d] += router_leak[r];
+            domain_total[d] += _power_telemetry.router_power[r];
+            if(domain_freq.find(d) == domain_freq.end()) {
+                domain_freq[d] = _router_freq_scale[r];
+            }
+            vector<long long> &v = domain_activity[d];
+            if(v.empty()) v.resize(_classes, 0);
+            for(int c = 0; c < _classes; ++c) {
+                v[c] += router_class_activity[r][c];
+            }
+        }
+        for(std::map<int,double>::const_iterator it = domain_total.begin(); it != domain_total.end(); ++it) {
+            int d = it->first;
+            double dyn_p = domain_dyn[d];
+            double leak_p = domain_leak[d];
+            double tot_p = domain_total[d];
+            double dyn_e = dyn_p * static_cast<double>(_dvfs_epoch);
+            double leak_e = leak_p * static_cast<double>(_dvfs_epoch);
+            double tot_e = tot_p * static_cast<double>(_dvfs_epoch);
+            const vector<long long> &act = domain_activity[d];
+            long long act_sum = 0;
+            for(size_t c = 0; c < act.size(); ++c) act_sum += act[c];
+            *_energy_out << (_dvfs_epoch ? (_time / _dvfs_epoch) : 0) << "," << _time << "," << d << "," << domain_freq[d]
+                         << "," << dyn_p << "," << leak_p << "," << tot_p
+                         << "," << dyn_e << "," << leak_e << "," << tot_e;
+            for(int c = 0; c < _classes; ++c) {
+                double frac = (act_sum > 0) ? (static_cast<double>(act[c]) / static_cast<double>(act_sum)) : 0.0;
+                double ce = dyn_e * frac; // attribute dynamic to class share
+                *_energy_out << "," << ce;
+            }
+            *_energy_out << endl;
+        }
+    }
+
+    if(do_log && _dvfs_log_out) {
+        std::map<int, double> domain_power;
+        std::map<int, double> domain_freq;
+        for(int r = 0; r < _routers; ++r) {
+            int d = _router_domains[r];
+            domain_power[d] += _power_telemetry.router_power[r];
+            if(domain_freq.find(d) == domain_freq.end()) {
+                domain_freq[d] = _router_freq_scale[r];
+            }
+        }
+        std::ostringstream oss;
+        oss << "DVFS epoch t=" << _time << " total_power=" << _power_telemetry.total_power;
+        double headroom = _power_cap > 0 ? (_power_cap - _power_telemetry.total_power) : 0.0;
+        double avg_power = (_dvfs_power_avg_count > 0) ? (_dvfs_power_avg_sum / static_cast<double>(_dvfs_power_avg_count)) : _power_telemetry.total_power;
+        oss << " headroom=" << headroom << " avg_power=" << avg_power;
+        oss << " domains{";
+        bool first = true;
+        for(std::map<int,double>::const_iterator it = domain_power.begin(); it != domain_power.end(); ++it) {
+            if(!first) oss << ", ";
+            first = false;
+            int d = it->first;
+            oss << d << ":freq=" << domain_freq[d] << ",power=" << it->second;
+        }
+        oss << "} routers{";
+        for(int r = 0; r < _routers; ++r) {
+            if(r) oss << ", ";
+            oss << r << ":freq=" << _router_freq_scale[r] << ",power=" << _power_telemetry.router_power[r];
+        }
+        oss << "}";
+        *_dvfs_log_out << oss.str() << endl;
+        if(_dvfs_log_out != &cout) {
+            cout << oss.str() << endl;
+        }
+        _dvfs_log_last = _time;
+    }
+
+    _dvfs_policy->Update(_power_telemetry, ctrl, (_dvfs_epoch ? (_time / _dvfs_epoch) : 0));
 }
   
 bool TrafficManager::_PacketsOutstanding( ) const
@@ -1304,6 +1948,7 @@ void TrafficManager::_ClearStats( )
 {
     _slowest_flit.assign(_classes, -1);
     _slowest_packet.assign(_classes, -1);
+    _policy_telemetry.class_latency_p99.assign(_classes, 0.0);
 
     for ( int c = 0; c < _classes; ++c ) {
 
@@ -1313,10 +1958,20 @@ void TrafficManager::_ClearStats( )
 
         _frag_stats[c]->Clear( );
 
+        _plat_pcnt_stats[c]->Clear();
+        _nlat_pcnt_stats[c]->Clear();
+        _flat_pcnt_stats[c]->Clear();
+        _qdel_pcnt_stats[c]->Clear();
+        _epoch_plat_pcnt_stats[c]->Clear();
+        _epoch_nlat_pcnt_stats[c]->Clear();
+        _epoch_qdel_pcnt_stats[c]->Clear();
+
         _sent_packets[c].assign(_nodes, 0);
         _accepted_packets[c].assign(_nodes, 0);
         _sent_flits[c].assign(_nodes, 0);
         _accepted_flits[c].assign(_nodes, 0);
+        _epoch_sent_packets[c] = 0;
+        _epoch_accepted_packets[c] = 0;
 
 #ifdef TRACK_STALLS
         _buffer_busy_stalls[c].assign(_subnets*_routers, 0);
@@ -1324,6 +1979,11 @@ void TrafficManager::_ClearStats( )
         _buffer_full_stalls[c].assign(_subnets*_routers, 0);
         _buffer_reserved_stalls[c].assign(_subnets*_routers, 0);
         _crossbar_conflict_stalls[c].assign(_subnets*_routers, 0);
+        _epoch_buffer_busy_stalls[c] = 0.0;
+        _epoch_buffer_conflict_stalls[c] = 0.0;
+        _epoch_buffer_full_stalls[c] = 0.0;
+        _epoch_buffer_reserved_stalls[c] = 0.0;
+        _epoch_crossbar_conflict_stalls[c] = 0.0;
 #endif
         if(_pair_stats){
             for ( int i = 0; i < _nodes; ++i ) {
@@ -1691,6 +2351,8 @@ bool TrafficManager::Run( )
     if(_print_csv_results) {
         DisplayOverallStatsCSV();
     }
+
+    _WriteCSVs();
   
     return true;
 }
@@ -1894,6 +2556,13 @@ void TrafficManager::WriteStats(ostream & os) const {
 }
 
 void TrafficManager::UpdateStats() {
+    _policy_telemetry.time = _time;
+    _policy_telemetry.class_latency_p99.resize(_classes, 0.0);
+    for(int c = 0; c < _classes; ++c) {
+        if(_measure_stats[c]) {
+            _policy_telemetry.class_latency_p99[c] = _nlat_pcnt_stats[c]->Percentile(0.99);
+        }
+    }
 #if defined(TRACK_FLOWS) || defined(TRACK_STALLS)
     for(int c = 0; c < _classes; ++c) {
 #ifdef TRACK_FLOWS
@@ -1928,6 +2597,11 @@ void TrafficManager::UpdateStats() {
                 _buffer_full_stalls[c][subnet*_routers+router] += r->GetBufferFullStalls(c);
                 _buffer_reserved_stalls[c][subnet*_routers+router] += r->GetBufferReservedStalls(c);
                 _crossbar_conflict_stalls[c][subnet*_routers+router] += r->GetCrossbarConflictStalls(c);
+                _epoch_buffer_busy_stalls[c] += r->GetBufferBusyStalls(c);
+                _epoch_buffer_conflict_stalls[c] += r->GetBufferConflictStalls(c);
+                _epoch_buffer_full_stalls[c] += r->GetBufferFullStalls(c);
+                _epoch_buffer_reserved_stalls[c] += r->GetBufferReservedStalls(c);
+                _epoch_crossbar_conflict_stalls[c] += r->GetCrossbarConflictStalls(c);
                 r->ResetStallStats(c);
 #endif
             }
@@ -2221,6 +2895,118 @@ string TrafficManager::_OverallStatsCSV(int c) const
 void TrafficManager::DisplayOverallStatsCSV(ostream & os) const {
     for(int c = 0; c < _classes; ++c) {
         os << "results:" << c << ',' << _OverallStatsCSV() << endl;
+    }
+}
+
+void TrafficManager::_WriteCSVs() {
+    string base_dir = _base_output_dir.empty() ? "sims" : _base_output_dir;
+    auto make_path = [&](const string &fname)->string {
+        if(fname.empty()) return "";
+        if(fname == "-") return "-";
+        if(!fname.empty() && fname[0] == '/') return fname;
+        return base_dir + "/" + fname;
+    };
+
+    // Latency percentiles per class
+    string lat_path = make_path(_latency_csv_name);
+    if(!lat_path.empty()) {
+        ostream *out = NULL;
+        ofstream lat_file;
+        if(lat_path == "-") {
+            out = &cout;
+        } else {
+            lat_file.open(lat_path.c_str());
+            if(lat_file.good()) out = &lat_file;
+        }
+        if(out) {
+            *out << "class,plat_p50,plat_p95,plat_p99,nlat_p50,nlat_p95,nlat_p99,flat_p50,flat_p95,flat_p99\n";
+            for(int c = 0; c < _classes; ++c) {
+                double plat50 = _plat_pcnt_stats[c]->Percentile(0.50);
+                double plat95 = _plat_pcnt_stats[c]->Percentile(0.95);
+                double plat99 = _plat_pcnt_stats[c]->Percentile(0.99);
+                double nlat50 = _nlat_pcnt_stats[c]->Percentile(0.50);
+                double nlat95 = _nlat_pcnt_stats[c]->Percentile(0.95);
+                double nlat99 = _nlat_pcnt_stats[c]->Percentile(0.99);
+                double flat50 = _flat_pcnt_stats[c]->Percentile(0.50);
+                double flat95 = _flat_pcnt_stats[c]->Percentile(0.95);
+                double flat99 = _flat_pcnt_stats[c]->Percentile(0.99);
+                *out << c << "," << plat50 << "," << plat95 << "," << plat99 << ","
+                     << nlat50 << "," << nlat95 << "," << nlat99 << ","
+                     << flat50 << "," << flat95 << "," << flat99 << "\n";
+            }
+        }
+    }
+
+#ifdef TRACK_STALLS
+    string stall_path = make_path(_stall_csv_name);
+    if(!stall_path.empty()) {
+        ostream *out = NULL;
+        ofstream stall_file;
+        if(stall_path == "-") out = &cout;
+        else {
+            stall_file.open(stall_path.c_str());
+            if(stall_file.good()) out = &stall_file;
+        }
+        if(out) {
+            *out << "class,buffer_busy,buffer_conflict,buffer_full,buffer_reserved,crossbar_conflict\n";
+            for(int c = 0; c < _classes; ++c) {
+                *out << c << ","
+                     << _overall_buffer_busy_stalls[c] << ","
+                     << _overall_buffer_conflict_stalls[c] << ","
+                     << _overall_buffer_full_stalls[c] << ","
+                     << _overall_buffer_reserved_stalls[c] << ","
+                     << _overall_crossbar_conflict_stalls[c] << "\n";
+            }
+        }
+    }
+#endif
+
+    string thr_path = make_path(_throughput_csv_name);
+    if(!thr_path.empty()) {
+        ostream *out = NULL;
+        ofstream thr_file;
+        if(thr_path == "-") out = &cout;
+        else {
+            thr_file.open(thr_path.c_str());
+            if(thr_file.good()) out = &thr_file;
+        }
+        if(out) {
+            double sim_time = static_cast<double>(_time - _reset_time);
+            *out << "class,offered_load,sent_packets,accepted_packets,sent_flits,accepted_flits,avg_throughput_flits_per_cycle\n";
+            for(int c = 0; c < _classes; ++c) {
+                int sentp = 0, accp = 0, sentf = 0, accf = 0;
+                _ComputeStats(_sent_packets[c], &sentp);
+                _ComputeStats(_accepted_packets[c], &accp);
+                _ComputeStats(_sent_flits[c], &sentf);
+                _ComputeStats(_accepted_flits[c], &accf);
+                double thr = (sim_time > 0) ? (static_cast<double>(accf) / sim_time) : 0.0;
+                double offered = (_load.size() > c) ? _load[c] : 0.0;
+                *out << c << "," << offered << "," << sentp << "," << accp << "," << sentf << "," << accf << "," << thr << "\n";
+            }
+        }
+    }
+
+    // Summary CSV (one line)
+    string sum_path = make_path(_summary_csv_name);
+    if(!sum_path.empty()) {
+        ostream *out = NULL;
+        ofstream sum_file;
+        if(sum_path == "-") out = &cout;
+        else {
+            sum_file.open(sum_path.c_str());
+            if(sum_file.good()) out = &sum_file;
+        }
+        if(out) {
+            *out << "policy,power_cap,control_p99,batch_p99,total_power_avg\n";
+            double control_p99 = _nlat_pcnt_stats.size() > 0 ? _nlat_pcnt_stats[0]->Percentile(0.99) : 0.0;
+            double batch_p99 = (_classes > 1 && _nlat_pcnt_stats.size() > 1) ? _nlat_pcnt_stats[1]->Percentile(0.99) : 0.0;
+            double avg_power = (_dvfs_power_avg_count > 0) ? (_dvfs_power_avg_sum / static_cast<double>(_dvfs_power_avg_count)) : 0.0;
+            *out << (_dvfs_policy ? _dvfs_policy->GetType() : "unknown") << ","
+                 << _power_cap << ","
+                 << control_p99 << ","
+                 << batch_p99 << ","
+                 << avg_power << "\n";
+        }
     }
 }
 

@@ -27,6 +27,8 @@
 
 #include "buffer_monitor.hpp"
 
+#include <algorithm>
+
 #include "flit.hpp"
 
 BufferMonitor::BufferMonitor( int inputs, int classes ) 
@@ -68,4 +70,10 @@ void BufferMonitor::display(ostream & os) const {
 ostream & operator<<( ostream & os, BufferMonitor const & obj ) {
   obj.display(os);
   return os ;
+}
+
+void BufferMonitor::Reset() {
+  _cycles = 0;
+  std::fill(_reads.begin(), _reads.end(), 0);
+  std::fill(_writes.begin(), _writes.end(), 0);
 }

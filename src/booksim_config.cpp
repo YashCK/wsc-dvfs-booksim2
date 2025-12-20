@@ -159,6 +159,22 @@ BookSimConfig::BookSimConfig( )
 
   _int_map["class_priority"] = 0;
   AddStrField("class_priority", ""); // workaraound to allow for vector specification
+  _int_map["class_slo"] = -1;
+  AddStrField("class_slo", ""); // per-class latency target (cycles) for policies
+  _float_map["class_priority_boost"] = 1.0;
+  AddStrField("class_priority_boost", ""); // optional boost when over SLO
+  _int_map["limit"] = 0; // optional node limit (0 = no limit)
+  _int_map["use_netrace"] = 0;
+  AddStrField("netrace_file", "");
+  _int_map["netrace_region"] = 0;
+  _int_map["netrace_ignore_deps"] = 0;
+  _int_map["netrace_scale"] = 1; // divide trace cycles by this factor
+  _int_map["netrace_class"] = 0;
+  _int_map["netrace_use_addr_size"] = 0; // if set, use packet->addr as size (bytes)
+  _int_map["netrace_class_from_node_types"] = 1; // if set, node_types carries class id
+  AddStrField("class_assigner", "static");
+  AddStrField("priority_policy", "static_class");
+  AddStrField("dvfs_policy", "static");
 
   _int_map["perm_seed"] = 0; // seed value for random permuation trafficpattern generator
   AddStrField("perm_seed", ""); // workaround to allow special "time" value
@@ -183,6 +199,89 @@ BookSimConfig::BookSimConfig( )
   _float_map["burst_r1"] = -1.0; // burst rate
 
   AddStrField( "priority", "none" );  // message priorities
+  _int_map["dvfs_epoch"] = 0; // number of cycles between DVFS updates; 0 disables
+  _float_map["power_cap"] = 0.0; // optional power cap for DVFS policies
+  _int_map["router_domains"] = 0;
+  AddStrField("router_domains", ""); // optional router->domain mapping
+  // DVFS frequency/voltage tables (single or list); allow numeric tokens
+  _float_map["dvfs_freqs"] = 1.0;
+  AddStrField("dvfs_freqs", ""); // e.g., "1.0 0.75 0.5"
+  _float_map["dvfs_voltages"] = 1.0;
+  AddStrField("dvfs_voltages", ""); // e.g., "1.0 0.9 0.8"
+  _float_map["dvfs_min_scale"] = 0.5;
+  AddStrField("dvfs_min_scale", "");
+  _float_map["dvfs_max_scale"] = 1.0;
+  AddStrField("dvfs_max_scale", "");
+  AddStrField("dvfs_domain_freqs", ""); // semicolon-separated per-domain lists, e.g., "1.0 0.8;1.0 0.6"
+  AddStrField("dvfs_domain_voltages", ""); // semicolon-separated per-domain voltage lists
+  _float_map["hw_reactive_high_thresh"] = 0.6;
+  _float_map["hw_reactive_low_thresh"] = 0.2;
+  _float_map["hw_reactive_high_scale"] = 1.0;
+  _float_map["hw_reactive_low_scale"] = 0.5;
+  _int_map["hw_reactive_hysteresis_epochs"] = 1;
+  AddStrField("hw_reactive_signal", "queue"); // queue | inj | stall | latency
+  _int_map["hw_reactive_per_router"] = 0; // 0 = per-domain
+  // Queue-based PID DVFS
+  _float_map["queue_pid_target"] = 0.01; // desired occupancy fraction
+  _float_map["queue_pid_kp"] = 0.05;
+  _float_map["queue_pid_ki"] = 0.0;
+  _float_map["queue_pid_kd"] = 0.0;
+  _int_map["queue_pid_per_router"] = 0;
+  _float_map["queue_pid_headroom_margin"] = 0.0;
+  // Performance-targeted DVFS (track latency/throughput)
+  AddStrField("perf_target_metric", "latency"); // latency|throughput
+  _float_map["perf_target_value"] = 0.0; // desired latency (cycles) or throughput (packets/cycle)
+  _int_map["perf_target_value"] = 0; // allow integer assignment
+  _int_map["perf_target_class"] = 0;
+  _float_map["perf_target_kp"] = 0.05;
+  _int_map["perf_target_per_router"] = 0;
+  _float_map["perf_target_headroom_margin"] = 0.0;
+  _float_map["power_dyn_base"] = 1.0; // arbitrary base dynamic power per router
+  _float_map["power_leak_base"] = 0.1; // arbitrary base leakage per router
+  AddStrField("dvfs_log", ""); // optional DVFS/power log file
+
+  // Control/SLO knobs for DVFS policies
+  _float_map["control_slo_cycles"] = 0.0; // 0 disables SLO-based boosting
+  _int_map["control_class_id"] = 0;
+  _float_map["hw_reactive_headroom_margin"] = 0.0; // W
+
+  // Output directories/names
+  AddStrField("output_dir", "sims");
+  AddStrField("run_name", "run");
+  AddStrField("latency_csv", "");
+  AddStrField("stall_csv", "");
+  AddStrField("throughput_csv", "");
+  AddStrField("summary_csv", "");
+  AddStrField("energy_csv", "");
+  AddStrField("epoch_csv", "");
+  _float_map["power_cap"] = 0.0;
+  _int_map["dvfs_log_interval"] = 0;
+
+  // Orion power modeling (defaults chosen to allow build/run without user config)
+  _int_map["use_orion"] = 0;
+  _float_map["Vdd"] = 1.0;
+  _float_map["Orion_tr"] = 0.2;
+  _float_map["Orion_Freq"] = 1e9;
+  _int_map["Orion_inport"] = 5;
+  _int_map["Orion_outport"] = 5;
+  _int_map["Orion_bitwidth"] = 128;
+  _int_map["Orion_vc_class"] = 1;
+  _int_map["Orion_IsSharedBuffIn"] = 0;
+  _int_map["Orion_IsSharedBuffOut"] = 0;
+  _int_map["Orion_crossbar_model"] = 0;
+  _int_map["Orion_crsbar_degree"] = 4;
+  _int_map["Orion_Cxbar_Cxpoint"] = 0;
+  _int_map["Orion_trans_type"] = 0;
+  _int_map["Orion_IsInBuff"] = 1;
+  _int_map["Orion_out_buf_size"] = 0;
+  _int_map["Orion_IsOutBuff"] = 0;
+  _int_map["Orion_buff_type"] = 0; // SRAM
+  _float_map["wire_length"] = 1.0; // used for Orion link modeling
+  _int_map["Orion_in_arb_model"] = 1; // RR
+  _int_map["Orion_out_arb_model"] = 1;
+  _int_map["Orion_allocator_model"] = 1; // two-stage
+  _int_map["Orion_in_vc_arb_model"] = 1;
+  _int_map["Orion_out_vc_arb_model"] = 1;
 
   _int_map["batch_size"] = 1000;
   _int_map["batch_count"] = 1;
@@ -240,6 +339,7 @@ BookSimConfig::BookSimConfig( )
   _int_map["pair_stats"] = 0;
 
   // if avg. latency exceeds the threshold, assume unstable
+  _int_map["latency_thres"] = 500;
   _float_map["latency_thres"] = 500.0;
   AddStrField("latency_thres", ""); // workaround to allow for vector specification
 

@@ -86,7 +86,7 @@ Power_Module::Power_Module(Network * n , const Configuration &config)
   Ci = (1.0 + 2.0) * Cg_pwr ;
   Co = (1.0 + 2.0) * Cd_pwr ;
 
-  Vdd    = pconfig.GetFloat("Vdd");
+  Vdd_pm    = pconfig.GetFloat("Vdd");
   FO4    = R * ( 3.0 * Cd + 12 * Cg + 12 * Cgdl);		     
   tCLK   = 20 * FO4;
   fCLK   = 1.0 / tCLK;              
@@ -186,13 +186,13 @@ double Power_Module::powerRepeatedWire(double L, double K, double M, double N){
   
   double segments = 1.0 * M * N ;
   double Ca = K * (Ci + Co) + Cw * (L/segments) ;
-  double Pa = 0.5 * Ca * Vdd * Vdd * fCLK;
+  double Pa = 0.5 * Ca * Vdd_pm * Vdd_pm * fCLK;
   return Pa * M * N  ;
 
 }
 
 double Power_Module::powerRepeatedWireLeak (double K, double M, double N){
-  double Pl = K * 0.5 * ( IoffN + 2.0 * IoffP ) * Vdd  ;
+  double Pl = K * 0.5 * ( IoffN + 2.0 * IoffP ) * Vdd_pm  ;
   return Pl * M * N ;
 
 }
@@ -205,7 +205,7 @@ double Power_Module:: powerWireClk (double M, double W){
   double clockLength = W * ChannelPitch ;
   double Cclk = (1 + 5.0/16.0 * (1+Co_delay/Ci_delay)) * (clockLength * Cw * columns +W * Ci_delay);
 
-  return M * Cclk * (Vdd * Vdd) * fCLK ;
+  return M * Cclk * (Vdd_pm * Vdd_pm) * fCLK ;
 
 }
 
@@ -214,7 +214,7 @@ double Power_Module::powerWireDFF(double M, double W, double alpha){
   double Cclk = 2 * 0.8 * (Ci + Co) + 2 * ( 2.0/3.0 * 0.8 * Cg_pwr) ;
   double Cint = (alpha * 0.5) * Cdin + alpha * Cclk ;
   
-  return Cint * M * W * (Vdd*Vdd) * fCLK ;
+  return Cint * M * W * (Vdd_pm*Vdd_pm) * fCLK ;
 }
 
 
@@ -267,7 +267,7 @@ double Power_Module::powerWordLine(double memoryWidth, double memoryDepth){
   double Cbd = Cprecharge + Cwren ;
   double Cwd = 2 * Cpredecode + Cdecode ;
 
-  return ( Cbd + Cwd ) * Vdd * Vdd * fCLK ;
+  return ( Cbd + Cwd ) * Vdd_pm * Vdd_pm * fCLK ;
   
 }
 
@@ -275,8 +275,8 @@ double Power_Module::powerMemoryBitRead(double memoryDepth){
   // bitline capacitance
   double Ccell  = 4.0 * LAMBDA * Cd_pwr + 8 * MetalPitch * Cw ; 
   double Cbl    = memoryDepth * Ccell ;
-  double Vswing = Vdd  ;
-  return ( Cbl ) * ( Vdd * Vswing ) * fCLK ;
+  double Vswing = Vdd_pm  ;
+  return ( Cbl ) * ( Vdd_pm * Vswing ) * fCLK ;
 }
 
 double Power_Module:: powerMemoryBitWrite(double memoryDepth){
@@ -287,12 +287,12 @@ double Power_Module:: powerMemoryBitWrite(double memoryDepth){
   // internal capacitance
   double Ccc    = 2 * (Co + Ci) ;
 
-  return (0.5 * Ccc * (Vdd*Vdd)) + ( Cbl ) * ( Vdd * Vdd ) * fCLK ;
+  return (0.5 * Ccc * (Vdd_pm*Vdd_pm)) + ( Cbl ) * ( Vdd_pm * Vdd_pm ) * fCLK ;
 }
 
 double Power_Module::powerMemoryBitLeak(double memoryDepth ){
   
-  return memoryDepth * IoffSRAM * Vdd ;
+  return memoryDepth * IoffSRAM * Vdd_pm ;
 }
 
 ///////////////////////////////////////////////////////////////
@@ -361,11 +361,11 @@ double Power_Module::powerCrossbar(double width, double inputs, double outputs, 
     Cin -= ( 0.5 * CwIn + outputs/2 * Cxi) ;
   }
   //this maybe missing +cti
-  double Cout = CwOut + Cto + (inputs * Cxo) ;
+  double Cout_pm = CwOut + Cto + (inputs * Cxo) ;
   if ( from < inputs/2) {
-    Cout -= ( 0.5 * CwOut + (inputs/2 * Cxo)) ;
+    Cout_pm -= ( 0.5 * CwOut + (inputs/2 * Cxo)) ;
   }
-  return 0.5 * (Cin + Cout) * (Vdd * Vdd * fCLK) ;
+  return 0.5 * (Cin + Cout_pm) * (Vdd_pm * Vdd_pm * fCLK) ;
 }
 
 
@@ -385,7 +385,7 @@ double Power_Module::powerCrossbarCtrl(double width, double inputs, double outpu
   double Cctrl  = width * Cti + (Wxbar + Hxbar) * Cw  ; 
   double Cdrive = (5.0/16.0) * (1 + Co_delay/Ci_delay) * Cctrl ;
 
-  return (Cdrive + Cctrl) * (Vdd*Vdd) * fCLK ;
+  return (Cdrive + Cctrl) * (Vdd_pm*Vdd_pm) * fCLK ;
   
 }
 
@@ -415,7 +415,7 @@ double Power_Module:: powerOutputCtrl(double width) {
 
     double Cenable = (1 + 5.0/16.0)*(1.0+Co/Ci)*(Woutmod* Cw + width* Cen) ;
 
-    return Cenable * (Vdd*Vdd) * fCLK ;
+    return Cenable * (Vdd_pm*Vdd_pm) * fCLK ;
     
 }
 

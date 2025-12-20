@@ -71,6 +71,11 @@ void Configuration::Assign(string const & field, int value)
   match = _int_map.find(field);
   if(match != _int_map.end()) {
     _int_map[field] = value;
+    // Keep synchronized with float map if the field exists there
+    map<string, double>::const_iterator fmatch = _float_map.find(field);
+    if(fmatch != _float_map.end()) {
+      _float_map[field] = static_cast<double>(value);
+    }
   } else {
     ParseError("Unknown integer field: " + field);
   }
@@ -83,6 +88,11 @@ void Configuration::Assign(string const & field, double value)
   match = _float_map.find(field);
   if(match != _float_map.end()) {
     _float_map[field] = value;
+    // Keep synchronized with int map if the field exists there
+    map<string, int>::const_iterator imatch = _int_map.find(field);
+    if(imatch != _int_map.end()) {
+      _int_map[field] = static_cast<int>(value);
+    }
   } else {
     ParseError("Unknown double field: " + field);
   }

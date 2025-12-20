@@ -62,6 +62,8 @@ protected:
   
   double _internal_speedup;
   double _partial_internal_cycles;
+  double _freq_scale;
+  int _freq_domain;
 
   int _crossbar_delay;
   int _credit_delay;
@@ -123,6 +125,7 @@ public:
 
   virtual int GetUsedCredit(int o) const = 0;
   virtual int GetBufferOccupancy(int i) const = 0;
+  virtual int GetBufferSize(int i) const { (void)i; return 1; }
 
 #ifdef TRACK_BUFFERS
   virtual int GetUsedCreditForClass(int output, int cl) const = 0;
@@ -197,6 +200,11 @@ public:
 
   inline int NumInputs() const {return _inputs;}
   inline int NumOutputs() const {return _outputs;}
+
+  inline void SetFrequencyScale(double s) { _freq_scale = s; }
+  inline double GetFrequencyScale() const { return _freq_scale; }
+  inline void SetFrequencyDomain(int d) { _freq_domain = d; }
+  inline int GetFrequencyDomain() const { return _freq_domain; }
 };
 
 #endif

@@ -59,6 +59,8 @@ public:
   inline int NumClasses() const {
     return _classes;
   }
+  inline int NumCycles() const { return _cycles; }
+  void Reset();
   void display(ostream & os) const;
 
 } ;

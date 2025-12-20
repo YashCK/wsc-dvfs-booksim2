@@ -32,6 +32,10 @@
 #include <map>
 #include <set>
 #include <cassert>
+#include <memory>
+#include <fstream>
+#include <sstream>
+#include <unordered_map>
 
 #include "module.hpp"
 #include "config_utils.hpp"
@@ -43,6 +47,13 @@
 #include "routefunc.hpp"
 #include "outputset.hpp"
 #include "injection.hpp"
+#include "class_config.hpp"
+#include "percentile_stats.hpp"
+#include "policy/class_assigner.hpp"
+#include "policy/priority_policy.hpp"
+#include "policy/dvfs_policy.hpp"
+#include "policy/telemetry.hpp"
+#include "netrace_adapter.hpp"
 
 //register the requests to a node
 class PacketReplyInfo;
@@ -62,6 +73,34 @@ protected:
 
   vector<Network *> _net;
   vector<vector<Router *> > _router;
+  vector<int> _router_domains;
+  vector<double> _router_freq_scale;
+  vector<double> _dvfs_freqs;
+  vector<double> _dvfs_voltages;
+  vector<vector<double> > _domain_freqs;
+  vector<vector<double> > _domain_voltages;
+  vector<double> _domain_min_scale;
+  vector<double> _domain_max_scale;
+  int _num_domains;
+  double _power_dyn_base;
+  double _power_leak_base;
+  bool _use_orion;
+  std::ostream * _dvfs_log_out;
+  std::string _dvfs_log_name;
+  std::string _output_dir;
+  std::string _run_name;
+  std::string _base_output_dir;
+  std::string _latency_csv_name;
+  std::string _stall_csv_name;
+  std::string _throughput_csv_name;
+  std::string _summary_csv_name;
+  std::string _energy_csv_name;
+  std::string _epoch_csv_name;
+  double _power_cap;
+  int _dvfs_log_interval;
+  long long _dvfs_log_last;
+  double _dvfs_power_avg_sum;
+  long long _dvfs_power_avg_count;
 
   // ============ Traffic ============ 
 
@@ -80,6 +119,19 @@ protected:
   vector<string> _traffic;
 
   vector<int> _class_priority;
+  vector<ClassConfig> _class_cfg;
+
+  PolicyTelemetry _policy_telemetry;
+  std::unique_ptr<ClassAssigner> _class_assigner;
+  std::unique_ptr<PriorityPolicy> _priority_policy;
+  std::unique_ptr<DVFSPolicy> _dvfs_policy;
+  bool _use_netrace;
+  int _netrace_class;
+  int _channel_width;
+  bool _netrace_use_addr_size;
+  bool _netrace_class_from_node_types;
+  std::unique_ptr<NetraceAdapter> _netrace_adapter;
+  std::unordered_map<int, nt_packet_t *> _netrace_inflight;
 
   vector<vector<int> > _last_class;
 
@@ -119,6 +171,12 @@ protected:
   bool _empty_network;
 
   bool _hold_switch_for_packet;
+  int _dvfs_epoch;
+  long long _last_dvfs_epoch;
+  std::ostream * _energy_out;
+  std::ostream * _epoch_out;
+  double _ClampDomainScale(int domain, double scale) const;
+  PowerTelemetry _power_telemetry;
 
   // ============ physical sub-networks ==========
 
@@ -143,16 +201,23 @@ protected:
   vector<double> _overall_min_plat;  
   vector<double> _overall_avg_plat;  
   vector<double> _overall_max_plat;  
+  vector<PercentileStats *> _plat_pcnt_stats;
+  vector<PercentileStats *> _epoch_plat_pcnt_stats;
 
   vector<Stats *> _nlat_stats;     
   vector<double> _overall_min_nlat;  
   vector<double> _overall_avg_nlat;  
   vector<double> _overall_max_nlat;  
+  vector<PercentileStats *> _nlat_pcnt_stats;
+  vector<PercentileStats *> _epoch_nlat_pcnt_stats;
 
   vector<Stats *> _flat_stats;     
   vector<double> _overall_min_flat;  
   vector<double> _overall_avg_flat;  
   vector<double> _overall_max_flat;  
+  vector<PercentileStats *> _flat_pcnt_stats;
+  vector<PercentileStats *> _qdel_pcnt_stats;
+  vector<PercentileStats *> _epoch_qdel_pcnt_stats;
 
   vector<Stats *> _frag_stats;
   vector<double> _overall_min_frag;
@@ -165,6 +230,9 @@ protected:
 
   vector<Stats *> _hop_stats;
   vector<double> _overall_hop_stats;
+
+  vector<long long> _epoch_sent_packets;
+  vector<long long> _epoch_accepted_packets;
 
   vector<vector<int> > _sent_packets;
   vector<double> _overall_min_sent_packets;
@@ -194,6 +262,11 @@ protected:
   vector<double> _overall_buffer_full_stalls;
   vector<double> _overall_buffer_reserved_stalls;
   vector<double> _overall_crossbar_conflict_stalls;
+  vector<double> _epoch_buffer_busy_stalls;
+  vector<double> _epoch_buffer_conflict_stalls;
+  vector<double> _epoch_buffer_full_stalls;
+  vector<double> _epoch_buffer_reserved_stalls;
+  vector<double> _epoch_crossbar_conflict_stalls;
 #endif
 
   vector<int> _slowest_packet;
@@ -266,11 +339,15 @@ protected:
 
   void _Inject();
   void _Step( );
+  void _MaybeRunDVFS();
 
   bool _PacketsOutstanding( ) const;
   
   virtual int  _IssuePacket( int source, int cl );
-  void _GeneratePacket( int source, int size, int cl, int time );
+  void _GeneratePacket( int source, int size, int cl, int time,
+                        int destination_override = -1,
+                        int size_override = -1,
+                        Flit::FlitType packet_type_override = Flit::ANY_TYPE );
 
   virtual void _ClearStats( );
 
@@ -288,6 +365,7 @@ protected:
 
   int _GetNextPacketSize(int cl) const;
   double _GetAveragePacketSize(int cl) const;
+  void _WriteCSVs();
 
 public:
 

@@ -33,9 +33,16 @@
 #include <queue>
 #include <set>
 #include <map>
+#include <vector>
 
 #include "router.hpp"
 #include "routefunc.hpp"
+#include "buffer.hpp"
+#include "ORION3_0/SIM_router.h"
+#include "ORION3_0/SIM_router_power.h"
+#include "ORION3_0/SIM_misc.h"
+#include "ORION3_0/SIM_misc_model.h"
+int Flexus_Orion_init(const Configuration& config);
 
 using namespace std;
 
@@ -64,10 +71,10 @@ class IQRouter : public Router {
   bool _active;
 
   int _routing_delay;
-  int _vc_alloc_delay;
-  int _sw_alloc_delay;
-  
-  map<int, Flit *> _in_queue_flits;
+	  int _vc_alloc_delay;
+	  int _sw_alloc_delay;
+	  
+	  vector<queue<Flit *> > _in_queue_flits;
 
   deque<pair<int, pair<Credit *, int> > > _proc_credits;
 
@@ -145,8 +152,19 @@ class IQRouter : public Router {
   //
   // ----------------------------------------
 
+  bool _orion_enabled;
+  SIM_router_info_t _orion_info;
+  SIM_router_power_t _orion_power;
+  double _orion_vdd;
+  double _orion_freq_hz;
+  double _orion_link_length;
+  int _orion_flit_width;
+  SIM_bus_t _orion_link_bus;
+  bool _orion_link_bus_valid;
   SwitchMonitor * _switchMonitor ;
   BufferMonitor * _bufferMonitor ;
+  double _ComputeOrionPower(double freq_scale);
+  void _ResetMonitors();
   
 public:
 
@@ -165,6 +183,7 @@ public:
 
   virtual int GetUsedCredit(int o) const;
   virtual int GetBufferOccupancy(int i) const;
+  virtual int GetBufferSize(int i) const { assert(i >=0 && i < _inputs); return _buf[i]->GetSize(); }
 
 #ifdef TRACK_BUFFERS
   virtual int GetUsedCreditForClass(int output, int cl) const;
@@ -177,6 +196,8 @@ public:
 
   SwitchMonitor const * const GetSwitchMonitor() const {return _switchMonitor;}
   BufferMonitor const * const GetBufferMonitor() const {return _bufferMonitor;}
+  double GetOrionPower(double freq_scale) { return _ComputeOrionPower(freq_scale); }
+  void ResetPowerMonitors() { _ResetMonitors(); }
 
 };
 
